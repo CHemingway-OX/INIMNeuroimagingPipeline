@@ -1,0 +1,17 @@
+{
+  "source_repository": "TWIN_MRI",
+  "source_head": "9586ebc8e80aa4e84c288305ee422c9b877468cc",
+  "copied_on": "2026-09-24",
+  "note": "Copied from working tree, including uncommitted changes; hashes describe source bytes before portability edits.",
+  "files": {
+    "Pipeline/struct_bids.sh": "adc4ff1a8af828e574143748fdf856a2ff8021064c5dd9b739f5a25a3b6a24aa",
+    "Pipeline/generate_structural_qc.py": "1bc86ccf00739a50de91ee040153d30ab44ee5baa6ec9f391e3c2f6f32be9be2",
+    "Pipeline/collect_structural_metrics.py": "e799b07d28be7fda4441610d3f19b6fb4a49c9ca67a406381e29c26ac3fc2f0c",
+    "run_scripts/run_fastsurfer_docker.py": "26045e756e6aa5035a0545e5d75e9dbe63e6bbc85d0123254b615afd28da90ab",
+    "run_scripts/run_lst_docker.py": "a499ab7e69485e84d4c6324bdc51ca1ac1dd7ed46db25527e42818e782f93a4b",
+    "run_scripts/run_lesioninpainting.py": "286ae2757cc5fbb75d4ad05b0b3e5dc74391d414227b7a6e3be6b3bcd1ced9a8",
+    "run_scripts/annotate.py": "070190ff7231380e4f49e18925871f715b06ffd216c6b0ba015b91110a1c8446",
+    "utils/utils.py": "4afc0a2f20f75d18efd5374db69932cd58fe7994b9819e7018606fa52741cfc0",
+    "utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

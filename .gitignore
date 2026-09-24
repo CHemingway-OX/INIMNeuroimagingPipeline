@@ -1,0 +1,14 @@
+.pixi/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.sif
+*.simg
+*.nii
+*.nii.gz
+*.mgz
+*.mgh
+license.txt
+logs/
+slurm-*.out
+.DS_Store

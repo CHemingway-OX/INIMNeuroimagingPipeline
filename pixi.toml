@@ -1,0 +1,24 @@
+[workspace]
+name = "inim-neuroimaging-pipeline"
+version = "0.1.0"
+description = "BIDS structural MRI orchestration, lesion annotation, QC and metrics"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.11.*"
+numpy = ">=1.26,<2"
+scipy = ">=1.11,<1.16"
+pandas = ">=2.1,<3"
+nibabel = ">=5.2,<6"
+matplotlib-base = ">=3.8,<4"
+scikit-image = ">=0.22,<0.26"
+
+[pypi-dependencies]
+antspyx = "==0.6.3"
+
+[tasks]
+struct = "bash Pipeline/struct_bids.sh --foreground"
+qc = "python Pipeline/generate_structural_qc.py"
+metrics = "python Pipeline/collect_structural_metrics.py"
+check = "python scripts/check_environment.py"

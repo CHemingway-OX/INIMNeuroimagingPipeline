@@ -9,7 +9,7 @@ FS_LICENSE_DIR="${FS_LICENSE_DIR:-${HOME}/freesurfer}"
 THREADS=8
 WORKERS=1
 LONG_PARALLEL_SEG=1
-LONG_PARALLEL_SURF=4
+LONG_PARALLEL_SURF=1
 LONG_THREADS_SURF=4
 SYSTEM="GH"
 CLIP_MIN="0.5"
@@ -49,7 +49,7 @@ Options:
   --threads N              Threads passed to FastSurfer and LST-AI. Default: 8
   --workers N              Worker count passed to LST-AI. Default: 1
   --long-parallel-seg N    Longitudinal FastSurfer segmentation jobs. Default: 1
-  --long-parallel-surf N   Longitudinal FastSurfer surface jobs. Default: 4
+  --long-parallel-surf N   Longitudinal FastSurfer surface jobs. Default: 1
   --long-threads-surf N    Threads per longitudinal surface job. Default: 4
   --system NAME            Processing system tag for existing wrappers. Default: GH
   --clip-min VALUE         LST-AI clipping minimum. Default: 0.5
@@ -59,6 +59,7 @@ Options:
   --subjects IDS          Comma-separated subject IDs, e.g. 001,002,sub-010
   --long                   Run FastSurfer with its longitudinal stream.
   --cpu                    Run wrappers in CPU mode where supported.
+  --container-runtime NAME docker (default), singularity or apptainer; also CONTAINER_RUNTIME.
   --foreground             Keep the pipeline attached to the current shell.
   --skip-fastsurfer        Skip FastSurfer.
   --skip-lst               Skip LST-AI.
@@ -192,6 +193,10 @@ while [[ $# -gt 0 ]]; do
             CPU_FLAG=1
             shift
             ;;
+        --container-runtime)
+            export CONTAINER_RUNTIME="$2"
+            shift 2
+            ;;
         --foreground)
             FOREGROUND=1
             shift
@@ -247,6 +252,14 @@ BIDS_DIR="${BIDS_DIR%/}"
 [[ -d "${BIDS_DIR}" ]] || { echo "BIDS directory not found: ${BIDS_DIR}" >&2; exit 1; }
 [[ -d "${FS_LICENSE_DIR}" ]] || { echo "FreeSurfer license directory not found: ${FS_LICENSE_DIR}" >&2; exit 1; }
 [[ -f "${FS_LICENSE_DIR}/license.txt" ]] || { echo "Missing ${FS_LICENSE_DIR}/license.txt" >&2; exit 1; }
+BIDS_DIR="$(cd "${BIDS_DIR}" && pwd)"
+FS_LICENSE_DIR="$(cd "${FS_LICENSE_DIR}" && pwd)"
+CONTAINER_RUNNER="${REPO_ROOT}/utils/container_runtime.py"
+if [[ "${CPU_FLAG}" -eq 1 && "${SKIP_LIT}" -eq 0 ]]; then
+    echo "FS-LIT requires GPU support in this pipeline. Use --skip-lit with --cpu." >&2
+    exit 1
+fi
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then FOREGROUND=1; fi
 command -v "${PYTHON_BIN}" >/dev/null 2>&1 || { echo "Python interpreter not found: ${PYTHON_BIN}" >&2; exit 1; }
 
 PIPELINE_ROOT="${BIDS_DIR}/derivatives/${STRUCT_NAME}"
@@ -255,7 +268,7 @@ QC_DIR="${PIPELINE_ROOT}/qc"
 METRICS_DIR="${PIPELINE_ROOT}/metrics"
 mkdir -p "${LOG_DIR}" "${QC_DIR}" "${METRICS_DIR}"
 
-RUN_ID="${STRUCT_BIDS_RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${STRUCT_BIDS_RUN_ID:-$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID:-local}_${SLURM_ARRAY_TASK_ID:-0}_$$}"
 RUN_LOG="${STRUCT_BIDS_RUN_LOG:-${LOG_DIR}/struct_bids_${RUN_ID}.log}"
 STATUS_FILE="${STRUCT_BIDS_STATUS_FILE:-${LOG_DIR}/struct_bids_${RUN_ID}.status}"
 
@@ -309,6 +322,10 @@ fi
 LST_DIR="${BIDS_DIR}/derivatives/${LST_NAME}"
 LIT_DIR="${BIDS_DIR}/derivatives/${LIT_NAME}"
 echo "FastSurfer derivatives: ${FASTSURFER_ACTIVE_DIR}"
+export FASTSURFER_OUTPUT_DIR="${FASTSURFER_ACTIVE_DIR}"
+if [[ "${CONTAINER_RUNTIME:-docker}" != docker && -z "${ASEGSTATS2TABLE:-}" ]]; then
+    export ASEGSTATS2TABLE="${REPO_ROOT}/scripts/asegstats2table"
+fi
 
 FASTSURFER_SCRIPT="${REPO_ROOT}/run_scripts/run_fastsurfer_docker.py"
 LST_SCRIPT="${REPO_ROOT}/run_scripts/run_lst_docker.py"
@@ -495,7 +512,7 @@ run_fastsurfer_longitudinal() {
     local conform_command=()
     local docker_command=()
 
-    command -v docker >/dev/null 2>&1 || { echo "Docker is required for FastSurfer longitudinal processing." >&2; exit 1; }
+    command -v "${CONTAINER_RUNTIME:-docker}" >/dev/null 2>&1 || { echo "Container runtime not found: ${CONTAINER_RUNTIME:-docker}" >&2; exit 1; }
 
     mkdir -p "${FASTSURFER_LONG_DIR}/longitudinal_work"
     LONG_TMP_ROOT="${PIPELINE_ROOT}/tmp/fastsurfer_long_${RUN_ID}"
@@ -564,13 +581,11 @@ run_fastsurfer_longitudinal() {
                 fi
                 input_rel="${t1w#"${BIDS_DIR}/"}"
                 conform_command=(
-                    docker run --rm --user "$(id -u):$(id -g)"
-                    -e FS_LICENSE=/fs_license/license.txt
-                    -v "${BIDS_DIR}:/input:ro"
-                    -v "${conformed_dir}:/output"
-                    -v "${FS_LICENSE_DIR}:/fs_license:ro"
-                    --entrypoint /bin/bash
-                    deepmi/fastsurfer:latest
+                    "${PYTHON_BIN}" "${CONTAINER_RUNNER}" --tool fastsurfer
+                    --bind "${BIDS_DIR}:/input:ro"
+                    --bind "${conformed_dir}:/output"
+                    --bind "${FS_LICENSE_DIR}:/fs_license:ro"
+                    -- /bin/bash
                     -lc 'if ! command -v mri_convert >/dev/null 2>&1; then for setup in /usr/local/freesurfer/SetUpFreeSurfer.sh /opt/freesurfer/SetUpFreeSurfer.sh /freesurfer/SetUpFreeSurfer.sh; do [[ -f "$setup" ]] && source "$setup" && break; done; fi; mri_convert --conform "$1" "$2"'
                     _
                     "/input/${input_rel}"
@@ -587,16 +602,15 @@ run_fastsurfer_longitudinal() {
         subject_work_dir="${FASTSURFER_LONG_DIR}/longitudinal_work/${subject_label}"
         mkdir -p "${subject_work_dir}"
 
-        docker_command=(docker run --rm --user "$(id -u):$(id -g)")
+        docker_command=("${PYTHON_BIN}" "${CONTAINER_RUNNER}" --tool fastsurfer --workdir /fastsurfer)
         if [[ "${CPU_FLAG}" -eq 0 ]]; then
-            docker_command+=(--gpus all)
+            docker_command+=(--gpu)
         fi
         docker_command+=(
-            -v "${LONG_TMP_ROOT}/${subject_label}:/data:ro"
-            -v "${subject_work_dir}:/output"
-            -v "${FS_LICENSE_DIR}:/fs_license:ro"
-            --entrypoint "/fastsurfer/long_fastsurfer.sh"
-            deepmi/fastsurfer:latest
+            --bind "${LONG_TMP_ROOT}/${subject_label}:/data:ro"
+            --bind "${subject_work_dir}:/output"
+            --bind "${FS_LICENSE_DIR}:/fs_license:ro"
+            -- /fastsurfer/long_fastsurfer.sh
             --fs_license /fs_license/license.txt
             --tid "${tid}"
             --t1s
@@ -627,7 +641,7 @@ run_fastsurfer_longitudinal() {
             if fastsurfer_timepoint_complete "${subject_label}" "${session_label}"; then
                 ensure_longitudinal_output_link "${subject_label}" "${session_label}"
             else
-                echo "${subject_label}_${session_label}: longitudinal FastSurfer outputs are incomplete after Docker run." >&2
+                echo "${subject_label}_${session_label}: longitudinal FastSurfer outputs are incomplete after container run." >&2
                 echo "Expected mri/aparc.DKTatlas+aseg.deep.mgz plus pial surfaces in $(fastsurfer_long_timepoint_dir "${subject_label}" "${session_label}")" >&2
                 subject_failed=1
             fi

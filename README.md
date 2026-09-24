@@ -1,138 +1,149 @@
 # INIM Neuroimaging Pipeline
 
-Structural MRI pipeline extracted from TWIN_MRI: FastSurfer, LST-AI, FS-LIT lesion
-inpainting, structural metrics and HTML QC. Entry point: `Pipeline/struct_bids.sh`.
-Inputs follow `sub-*/ses-*/anat/`; derivatives are written below the BIDS root.
-Use `--system GH` (default) or `--system BMC` according to the existing filename
-conventions. This option is a dataset convention, not a cluster selection.
+BIDS structural MRI processing: FastSurfer, LST-AI, FS-LIT inpainting, metrics and
+HTML QC. Inputs follow `sub-*/ses-*/anat/`; derivatives stay below the BIDS root.
+The pipeline supports Docker, SingularityCE and Apptainer. The supplied HPC
+configuration targets SingularityCE 4.2 and the core-nrad-liebig Slurm partitions.
 
-## Pixi environment
+## Python environment
 
-Target: Linux x86-64 (`linux-64`), Python **3.11**. The environment deliberately
-uses NumPy 1.x and SciPy <1.16 for this initial dependency baseline. This does
-not assert that other versions cannot work. Python 3.11 is the supported version
-for this extraction; the original project did not provide a dependency lock.
+Linux x86-64, Python **3.11**, with the exact dependency builds in `pixi.lock`.
+The manifest declares NumPy >=1.26,<2, SciPy >=1.11,<1.16, pandas >=2.1,<3,
+nibabel >=5.2,<6, matplotlib-base >=3.8,<4, scikit-image >=0.22,<0.26 and
+antspyx ==0.6.3 (imported as `ants`). Pixi resolves their native and Python
+dependencies. GPU application libraries are supplied by the containers.
 
-| Library | Manifest constraint | Purpose |
+```bash
+export PIXI_CACHE_DIR=/data/core-nrad-liebig/chemingw/INIM_NIPipeline
+pixi install --locked
+pixi run --locked check
+pixi run --locked test
+```
+
+Commit the manifest and lockfile, not `.pixi/`. No dependency changes are needed
+for the Singularity backend. A lockfile-format warning from newer Pixi is harmless.
+
+## HPC setup (no GPU allocation needed)
+
+From the updated repository on the HPC:
+
+```bash
+cp hpc/config.example.sh hpc/config.local.sh
+# Edit BIDS_DIR and FS_LICENSE_DIR in hpc/config.local.sh.
+# FS_LICENSE_DIR must contain your FreeSurfer license.txt.
+source hpc/config.local.sh
+mkdir -p "$PIXI_CACHE_DIR" "$SINGULARITY_CACHEDIR" "$CONTAINER_DIR" logs
+pixi install --locked
+pixi run --locked check
+pixi run --locked test
+pixi run --locked prepare-images
+```
+
+Image preparation downloads large images; run on a network-enabled node where
+site policy allows container pulls. It does not request a GPU or submit a job.
+Allow ample disk space for both the conversion cache and final images. If the
+site requires conversion temporary files on project/scratch storage, set
+`SINGULARITY_TMPDIR` to an existing writable directory with sufficient space.
+
+The image preparation task pulls these versions by verified registry digest:
+
+| Tool | Version | Default SIF filename |
 | --- | --- | --- |
-| Python | 3.11.* | Pipeline wrappers and reporting |
-| NumPy | >=1.26,<2 | Image arrays |
-| SciPy | >=1.11,<1.16 | Image processing and resampling |
-| pandas | >=2.1,<3 | Metrics tables |
-| nibabel | >=5.2,<6 | NIfTI and FreeSurfer image I/O |
-| matplotlib-base | >=3.8,<4 | Headless QC figures (`matplotlib` import) |
-| scikit-image | >=0.22,<0.26 | Connected components and morphology |
-| antspyx (PyPI) | ==0.6.3 | ANTs image transforms (`ants` import) |
+| FastSurfer | cuda-v2.4.2 | fastsurfer-2.4.2.sif |
+| LST-AI | v1.2.0 | lst-ai-1.2.0.sif |
+| FS-LIT | 0.5.0 | lit-0.5.0.sif |
 
-Pixi resolves transitive dependencies, including ANTsPy's additional Python
-libraries and native runtime libraries. PyTorch/CUDA application dependencies
-belong to the processing containers, not this host Python environment.
+Digests are recorded in `utils/container_runtime.py`. Preparation writes a JSON
+source record and SHA-256 checksum beside each SIF and refuses to reuse an image
+with a mismatched source record. Use `FASTSURFER_SIF`, `LST_SIF` or `LIT_SIF` to
+use existing local images. `*_DOCKER_IMAGE` variables override registry sources
+for preparation and Docker execution; prefer digests for reproducibility.
 
-On a login node with network access, from this repository:
+## Submit one subject when ready
 
-```bash
-pixi install
-pixi run check
-pixi run struct --help
-```
-
-Commit `pixi.toml` and the generated `pixi.lock`; never commit `.pixi/`.
-For an existing lockfile, use `pixi install --locked`. Prepare the environment
-before submitting compute jobs; compute nodes need access to the repository and
-its environment, but should not need to download packages at job startup.
-
-## External software and configuration
-
-**The current processing backend is Docker. Apptainer/Singularity support has
-not yet been implemented. Installing Pixi alone does not make the full pipeline
-runnable on an Apptainer-only cluster.**
-
-The processing wrappers currently use:
-
-- `deepmi/fastsurfer:latest` (also for the longitudinal stream).
-- `jqmcginnis/lst-ai:v1.2.0`.
-- `deepmi/lit:<version from the LIT checkout>`, or `LIT_IMAGE` if set.
-
-These images and their model weights must be available to the container runtime.
-FastSurfer output directory names contain `v2.4.2`, but the actual image is still
-`latest`; pin and validate image versions before production processing.
-
-Requirements outside Pixi:
-
-- Bash and GNU command-line utilities on the Linux host.
-- Docker access for the current implementation, plus NVIDIA container support
-  and a GPU allocation. `--cpu` is not sufficient to remove all GPU requests.
-- FreeSurfer `license.txt`; set `FS_LICENSE_DIR` or pass `--fs-license-dir`.
-  The portable fallback is `$HOME/freesurfer`.
-- A FreeSurfer installation/module exposing `asegstats2table` for metric
-  collection. Source `SetUpFreeSurfer.sh` as appropriate, or set `ASEGSTATS2TABLE`
-  to its executable path. The license alone does not provide this program.
-- A separate FS-LIT source checkout, mounted into the LIT container at
-  `/inpainting`. Set `LIT_REPO` to its absolute path; the fallback is a sibling
-  `LIT` directory next to this repository. This external project was not copied.
-  The original local checkout reported version 0.5.0. Set `LIT_IMAGE` explicitly
-  if needed and use a compatible source checkout/image pair.
-
-Example once the external requirements are available:
+No GPU diagnostic job is required before submission. From the repository root:
 
 ```bash
-export LIT_REPO=/project/software/LIT
-export FS_LICENSE_DIR=/project/licenses/freesurfer
-pixi run struct --bids-dir /project/data/BIDS --subjects 001 --threads 8
+mkdir -p logs
+sbatch hpc/struct.sbatch 001
+# Longitudinal alternative: all available sessions of this subject together.
+# sbatch hpc/struct.sbatch 001 --long
 ```
 
-The `struct` Pixi task includes `--foreground`, which is required under Slurm.
-Use absolute paths for data, license and LIT locations.
+The processing template requests `jobs-gpu-long`, one full A100, eight CPUs,
+32 GiB RAM and 24 hours. These are pilot resource requests, not measured needs.
+The partition permits up to seven days; adjust `--time` after a pilot. Add
+`--account=...` or other site-required submission options if necessary.
+The default `testing` partition has only 15 minutes, so templates explicitly
+choose a partition. No jobs are submitted by installation, image preparation,
+environment checks or tests.
 
-## Slurm deployment notes
+Jobs inherit the cluster GPU allocation: the runtime forwards
+`CUDA_VISIBLE_DEVICES` through Singularity's clean environment and uses `--nv`
+only for GPU stages. Do not hard-code GPU indices. The pipeline runs in the
+foreground under Slurm, and logs/status filenames include job identifiers.
+Each container call is independent, so there are no fixed Docker instance names.
 
-Submit through `sbatch` using the site's account, partition, memory, CPU and GPU
-settings. Inside the batch job, change to this repository and run, for example:
+The processing job skips shared dataset-wide reports. After processing succeeds,
+submit a CPU reporting job, replacing 12345 with the processing job ID:
 
 ```bash
-export STRUCT_BIDS_RUN_ID="${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID:-0}"
-export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
-export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS="$SLURM_CPUS_PER_TASK"
-pixi run --locked struct --bids-dir /project/data/BIDS \
-  --subjects 001 --threads "$SLURM_CPUS_PER_TASK" --workers 1 \
-  --skip-qc --skip-summary
+sbatch --dependency=afterok:12345 hpc/report.sbatch --subjects 001
+# Add --long here too if processing used --long.
 ```
 
-This is only a launch pattern: it still requires Docker or a future Apptainer
-backend. The current Docker wrappers use fixed container names, so concurrent
-jobs on the same Docker daemon can collide. Some container/worker failures are
-not propagated reliably yet; verify outputs and fix failure propagation before
-large array runs. Keep all sessions of a subject together for `--long`; budget
-`--long-parallel-surf` times `--long-threads-surf` against the CPU allocation.
+For a completed cohort, omit `--subjects` to generate dataset-wide reports.
+Run only one report job at a time because the summary CSV and HTML index are
+shared. The report job uses FreeSurfer's `asegstats2table` inside the FastSurfer
+image, so a separate host FreeSurfer install is unnecessary for Singularity.
+An explicit `ASEGSTATS2TABLE` setting can still select a host executable.
 
-Generate dataset-wide metrics and QC in one separate job after processing;
-parallel subject jobs otherwise overwrite the shared CSV and HTML index.
-The reporting-only invocation is:
+## Local execution and runtime choices
 
 ```bash
-pixi run --locked struct --bids-dir /project/data/BIDS \
-  --skip-fastsurfer --skip-lst --skip-lit
+source hpc/config.local.sh
+pixi run --locked struct --bids-dir "$BIDS_DIR" \
+  --fs-license-dir "$FS_LICENSE_DIR" --subjects 001 --threads 8
 ```
 
-Supply the license directory even for this invocation, since the shell driver
-currently checks it unconditionally. Add `--long` if processing used longitudinal
-FastSurfer. Before relying on Slurm `afterok` dependencies, fix the failure
-propagation noted above.
+Run processing only inside an allocation on the HPC. The above is an invocation
+example, not an instruction to process images on the login node.
+`CONTAINER_RUNTIME` can be `singularity`, `apptainer`, or `docker` (the default
+outside the HPC config). `--container-runtime singularity` also selects it.
+FastSurfer and LST-AI support CPU mode; use `--cpu --skip-lit` because FS-LIT is
+GPU-enabled in this pipeline. The longitudinal surface default is one parallel
+job; budget its thread count against the Slurm allocation.
 
-## Source provenance and validation
+FS-LIT now uses code and weights packaged in its image; a separate checkout is
+not required by default. Explicit `LIT_REPO` overrides must contain `run_lit.sh`,
+`lit/inpaint_image.py`, and all three model weights under `weights/`. Such an
+override replaces `/inpainting` and must match the selected image. The earlier
+`LIT_IMAGE` variable is superseded by `LIT_DOCKER_IMAGE` / `LIT_SIF`.
 
-`SOURCE_PROVENANCE.json` records the original Git HEAD and source-file SHA-256
-hashes. Files were copied from the working tree, including existing uncommitted
-changes. No imaging datasets, derived outputs, licenses or model weights were
-copied. The original TWIN_MRI working tree was not changed.
+Historical derivative folder names retain `_docker` for compatibility with
+existing QC and metrics paths, even when processing uses Singularity.
+Existing FastSurfer outputs will be reused: do not mix prior `latest` image
+results with this pinned version without deciding how to handle that version
+change. Use a fresh BIDS derivative location/cohort copy for the first pilot.
 
-Changes in this extraction: portable FreeSurfer license default, configurable
-`LIT_REPO` and `LIT_IMAGE`, an early check for the LIT checkout, and Pixi setup.
-The existing processing algorithms are retained.
+## Validation and provenance
 
-`pixi run check` checks dependency imports, Python entry-point help and Bash
-syntax without launching containers or processing scans. A successful check
-is not end-to-end validation of container processing or scientific results.
+`pixi run check` imports dependencies and checks entry-point help and Bash syntax.
+`pixi run test` uses fake container executables to exercise GPU environment
+handling, mounts, failure propagation, cross-sectional and longitudinal
+orchestration, restart behavior, FS-LIT invocation and container-based metrics.
+These tests require neither Singularity nor a GPU and never submit Slurm jobs.
 
-References: [Pixi manifest](https://pixi.prefix.dev/v0.62.2/reference/pixi_manifest/)
-and [ANTsPy package](https://pypi.org/project/antspyx/0.6.3/).
+Real SIF conversion, the site's GPU/driver integration and scientific outputs
+still require validation on the HPC. A passing local test is not an end-to-end
+imaging validation. Full container processing has not been run as part of this
+conversion.
+
+`SOURCE_PROVENANCE.json` records the original TWIN_MRI working-tree hashes and
+Git HEAD before the extraction and subsequent portability edits. No datasets,
+licenses or model weights are stored in this repository. The original TWIN_MRI
+repository is unchanged.
+
+References: [SingularityCE 4.2](https://docs.sylabs.io/guides/4.2/user-guide/),
+[FastSurfer](https://github.com/Deep-MI/FastSurfer),
+[Slurm GPU resources](https://slurm.schedmd.com/gres.html).

@@ -12,3 +12,6 @@ license.txt
 logs/
 slurm-*.out
 .DS_Store
+
+hpc/config.local.sh
+containers/

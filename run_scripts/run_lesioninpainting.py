@@ -13,61 +13,27 @@ import re
 import ants
 from utils.utils import getSessionID, getSubjectID, split_list, getfileList, availability_check
 import numpy as np
-
-
-LIT_REPO = Path(os.environ.get("LIT_REPO", str(Path(__file__).resolve().parents[2] / "LIT"))).expanduser().resolve()
-
-
-def resolve_lit_image() -> str:
-    if os.environ.get("LIT_IMAGE"):
-        return os.environ["LIT_IMAGE"]
-    pyproject = LIT_REPO / "pyproject.toml"
-    if pyproject.exists():
-        match = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text())
-        if match:
-            return f"deepmi/lit:{match.group(1)}"
-    return "deepmi/lit:latest"
+from utils.container_runtime import run_container
 
 
 def run_lit_container(input_image: str, mask_image: str, output_directory: str, dilate: int) -> None:
-    if not (LIT_REPO / "pyproject.toml").is_file():
-        raise FileNotFoundError(
-            f"LIT checkout not found at {LIT_REPO}. Set LIT_REPO to the LIT source directory."
-        )
-    image_name = resolve_lit_image()
-    command = [
-        "docker",
-        "run",
-        "--gpus",
-        "device=all",
-        "--ipc=host",
-        "--ulimit",
-        "memlock=-1",
-        "--ulimit",
-        "stack=67108864",
-        "--rm",
-        "-v",
-        f"{input_image}:{input_image}:ro",
-        "-v",
-        f"{mask_image}:{mask_image}:ro",
-        "-v",
-        f"{output_directory}:{output_directory}",
-        "-v",
-        f"{LIT_REPO}:/inpainting",
-        "-u",
-        f"{os.getuid()}:{os.getgid()}",
-        image_name,
-        "-i",
-        input_image,
-        "-m",
-        mask_image,
-        "-o",
-        output_directory,
-        "--dilate",
-        str(dilate),
-    ]
-    print(" ".join(command))
-    subprocess.run(command, check=True)
+    input_image = str(Path(input_image).resolve())
+    mask_image = str(Path(mask_image).resolve())
+    output_directory = str(Path(output_directory).resolve())
+    binds = [f"{input_image}:{input_image}:ro", f"{mask_image}:{mask_image}:ro",
+             f"{output_directory}:{output_directory}"]
+    # Packaged code and weights are used unless an explicit override is requested.
+    if os.environ.get("LIT_REPO"):
+        repo = Path(os.environ["LIT_REPO"]).expanduser().resolve()
+        required = [repo / "run_lit.sh", repo / "lit/inpaint_image.py"]
+        required += [repo / "weights" / f"model_{view}.pt" for view in ("axial", "coronal", "sagittal")]
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise FileNotFoundError("LIT_REPO override is missing code/weights: " + ", ".join(missing))
+        binds.append(f"{repo}:/inpainting:ro")
+    run_container("lit", ["/bin/bash", "/inpainting/run_lit.sh", "-i", input_image,
+                  "-m", mask_image, "-o", output_directory, "--dilate", str(dilate)],
+                  binds, gpu=True, workdir="/inpainting")
 
 
 def parse_subject_ids(subjects_arg):
@@ -234,7 +200,7 @@ if __name__ == "__main__":
     # read the arguments
     args = parser.parse_args()
     
-    input_path = args.input_directory
+    input_path = str(Path(args.input_directory).resolve())
     
 
     out_dir = os.path.join(input_path, "derivatives/FS-LIT2")

@@ -22,3 +22,6 @@ struct = "bash Pipeline/struct_bids.sh --foreground"
 qc = "python Pipeline/generate_structural_qc.py"
 metrics = "python Pipeline/collect_structural_metrics.py"
 check = "python scripts/check_environment.py"
+
+prepare-images = "python scripts/prepare_images.py"
+test = "python -m unittest discover -s tests -v"

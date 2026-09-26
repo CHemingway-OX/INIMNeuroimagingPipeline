@@ -80,23 +80,44 @@ The default `testing` partition has only 15 minutes, so templates explicitly
 choose a partition. No jobs are submitted by installation, image preparation,
 environment checks or tests.
 
-## Submit a cohort as an array job
+## Submit a cohort (GPU/CPU split)
 
-`hpc/submit_cohort.sh` submits one array task per subject and, afterwards, one
-dataset-wide report job (`afterany`, so reports cover subjects that succeeded):
+`hpc/submit_cohort.sh` submits per subject a short GPU job and a CPU job, then
+one dataset-wide report job:
 
 ```bash
-hpc/submit_cohort.sh --subjects-file cohort.txt --max-parallel 2 --time 06:00:00 -- --long
+hpc/submit_cohort.sh --subjects-file cohort.txt -- --long
+hpc/submit_cohort.sh --subjects 394,395 --cpu-time 06:00:00 -- --long
 hpc/submit_cohort.sh --all --dry-run          # preview; every sub-* in BIDS_DIR
 ```
 
+| Stage (`struct_bids.sh --stage`) | Template | Work |
+| --- | --- | --- |
+| `gpu` | `hpc/struct.sbatch` (jobs-gpu, 1 A100) | FastSurfer segmentation, LST-AI segmentation, FS-LIT |
+| `cpu` | `hpc/struct_cpu.sbatch` (jobs-cpu, 8 CPUs) | FastSurfer surfaces, LST-AI annotation |
+
+Surface reconstruction takes most of the FastSurfer time but never uses the GPU
+(for sub-394 with two sessions: about 8 min segmentation versus 1:40 h
+surfaces), so the split frees the A100 after the segmentation. The LST-AI
+annotation needs `aparc.DKTatlas+aseg.mapped.mgz`, which FastSurfer creates
+with the surfaces, so it runs in the CPU job. Longitudinal processing runs the
+steps of FastSurfer's `long_fastsurfer.sh` in the same order through
+`Pipeline/fastsurfer_long_phase.sh`, because `long_fastsurfer.sh` itself cannot
+be split. `--stage all` (the default) keeps the single-job behaviour; use
+`--no-split` in `submit_cohort.sh` for that.
+
+CPU task N starts only after GPU task N succeeded (`aftercorr`); CPU tasks whose
+GPU task failed are cancelled. The report job starts after all CPU tasks ended
+(`afterany`), so it covers the subjects that succeeded.
+
 The subject list (one ID per line, `001` or `sub-001`, `#` comments allowed) is
 validated against `BIDS_DIR` and frozen to `logs/cohort_<timestamp>.txt`, because
-array task N reads line N. `--max-parallel` throttles concurrent tasks (`%K`);
-the jobs-gpu QoS allows at most 4 A100 per user and the cluster has 8 in total,
-so keep the default of 2 while others are queued. List failed tasks with
-`sacct -j <array id> --state=FAILED,TIMEOUT,OUT_OF_MEMORY -X` and resubmit only
-those subjects; finished stages are skipped on rerun.
+array task N reads line N. `--max-parallel` throttles concurrent GPU tasks; the
+jobs-gpu QoS allows at most 4 A100 per user and the cluster has 8 in total, so
+keep the default of 2 while others are queued. `--max-parallel-cpu` (default 8,
+64 CPUs) throttles CPU tasks. List failed tasks with
+`sacct -j <gpu id>,<cpu id> --state=FAILED,TIMEOUT,OUT_OF_MEMORY,CANCELLED -X`
+and resubmit only those subjects; finished stages are skipped on rerun.
 
 Jobs inherit the cluster GPU allocation: the runtime forwards
 `CUDA_VISIBLE_DEVICES` through Singularity's clean environment and uses `--nv`

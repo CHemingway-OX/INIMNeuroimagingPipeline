@@ -26,6 +26,7 @@ SKIP_QC=0
 SKIP_SUMMARY=0
 LONG_FASTSURFER=0
 LONG_TMP_ROOT=""
+STAGE="all"
 
 FASTSURFER_NAME="fastsurfer_v2.4.2_docker"
 FASTSURFER_LONG_NAME="fastsurfer_v2.4.2_docker_long"
@@ -58,6 +59,9 @@ Options:
   --dilate N               FS-LIT mask dilation. Default: 1
   --subjects IDS          Comma-separated subject IDs, e.g. 001,002,sub-010
   --long                   Run FastSurfer with its longitudinal stream.
+  --stage NAME             all (default), gpu or cpu. gpu: FastSurfer segmentation, LST-AI
+                           segmentation and FS-LIT. cpu: FastSurfer surfaces and LST-AI
+                           annotation, without containers requesting a GPU. Run gpu first.
   --cpu                    Run wrappers in CPU mode where supported.
   --container-runtime NAME docker (default), singularity or apptainer; also CONTAINER_RUNTIME.
   --foreground             Keep the pipeline attached to the current shell.
@@ -193,6 +197,14 @@ while [[ $# -gt 0 ]]; do
             CPU_FLAG=1
             shift
             ;;
+        --stage)
+            STAGE="$2"
+            shift 2
+            ;;
+        --stage=*)
+            STAGE="${1#*=}"
+            shift
+            ;;
         --container-runtime)
             export CONTAINER_RUNTIME="$2"
             shift 2
@@ -254,7 +266,22 @@ BIDS_DIR="${BIDS_DIR%/}"
 [[ -f "${FS_LICENSE_DIR}/license.txt" ]] || { echo "Missing ${FS_LICENSE_DIR}/license.txt" >&2; exit 1; }
 BIDS_DIR="$(cd "${BIDS_DIR}" && pwd)"
 FS_LICENSE_DIR="$(cd "${FS_LICENSE_DIR}" && pwd)"
+case "${STAGE}" in
+    all) ;;
+    gpu)
+        # Dataset reports need surfaces, which the cpu stage creates.
+        SKIP_QC=1
+        SKIP_SUMMARY=1
+        ;;
+    cpu)
+        # Surface reconstruction and annotation never use the GPU; FS-LIT belongs to the gpu stage.
+        CPU_FLAG=1
+        SKIP_LIT=1
+        ;;
+    *) echo "Unknown --stage: ${STAGE} (use all, gpu or cpu)" >&2; exit 1 ;;
+esac
 CONTAINER_RUNNER="${REPO_ROOT}/utils/container_runtime.py"
+LONG_PHASE_SCRIPT="${SCRIPT_DIR}/fastsurfer_long_phase.sh"
 if [[ "${CPU_FLAG}" -eq 1 && "${SKIP_LIT}" -eq 0 ]]; then
     echo "FS-LIT requires GPU support in this pipeline. Use --skip-lit with --cpu." >&2
     exit 1
@@ -345,6 +372,16 @@ fi
 SUBJECT_ARGS=()
 if [[ -n "${SUBJECTS_CSV}" ]]; then
     SUBJECT_ARGS+=(--subjects "${SUBJECTS_CSV}")
+fi
+
+FASTSURFER_STAGE_ARGS=()
+LST_STAGE_ARGS=()
+if [[ "${STAGE}" == gpu ]]; then
+    FASTSURFER_STAGE_ARGS+=(--stage seg)
+    LST_STAGE_ARGS+=(--skip_annotation)
+elif [[ "${STAGE}" == cpu ]]; then
+    FASTSURFER_STAGE_ARGS+=(--stage surf)
+    LST_STAGE_ARGS+=(--annotation_only)
 fi
 
 run_step() {
@@ -462,6 +499,16 @@ fastsurfer_timepoint_complete() {
         && ( -f "${subject_dir}/surf/rh.pial" || -f "${subject_dir}/surf/rh.pial.T1" ) ]]
 }
 
+fastsurfer_long_segmented() {
+    local subject_label="$1"
+    shift
+    local session_label
+    [[ -f "${FASTSURFER_LONG_DIR}/longitudinal_work/${subject_label}/${subject_label}_template/mri/aparc.DKTatlas+aseg.deep.mgz" ]] || return 1
+    for session_label in "$@"; do
+        [[ -f "$(fastsurfer_long_timepoint_dir "${subject_label}" "${session_label}")/mri/aparc.DKTatlas+aseg.deep.mgz" ]] || return 1
+    done
+}
+
 ensure_longitudinal_output_link() {
     local subject_label="$1"
     local session_label="$2"
@@ -563,8 +610,21 @@ run_fastsurfer_longitudinal() {
             done
             continue
         fi
+        if [[ "${STAGE}" == gpu ]] && fastsurfer_long_segmented "${subject_label}" "${session_labels[@]}"; then
+            echo "${subject_label}: longitudinal FastSurfer segmentations already exist; surfaces follow in the cpu stage."
+            continue
+        fi
+        if [[ "${STAGE}" == cpu ]] && ! fastsurfer_long_segmented "${subject_label}" "${session_labels[@]}"; then
+            echo "${subject_label}: longitudinal FastSurfer segmentations missing; run --stage gpu first." >&2
+            exit 1
+        fi
 
-        for i in "${!tpids[@]}"; do
+        # The cpu stage continues from the segmented template and needs no conformed inputs.
+        local -a conform_indices=()
+        if [[ "${STAGE}" != cpu ]]; then
+            conform_indices=("${!tpids[@]}")
+        fi
+        for i in "${conform_indices[@]}"; do
             tpid="${tpids[i]}"
             t1w="${host_t1s[i]}"
 
@@ -606,16 +666,28 @@ run_fastsurfer_longitudinal() {
         if [[ "${CPU_FLAG}" -eq 0 ]]; then
             docker_command+=(--gpu)
         fi
+        if [[ "${STAGE}" != cpu ]]; then
+            docker_command+=(--bind "${LONG_TMP_ROOT}/${subject_label}:/data:ro")
+        fi
         docker_command+=(
-            --bind "${LONG_TMP_ROOT}/${subject_label}:/data:ro"
             --bind "${subject_work_dir}:/output"
             --bind "${FS_LICENSE_DIR}:/fs_license:ro"
-            -- /fastsurfer/long_fastsurfer.sh
+        )
+        if [[ "${STAGE}" == all ]]; then
+            docker_command+=(-- /fastsurfer/long_fastsurfer.sh)
+        else
+            docker_command+=(
+                --bind "${LONG_PHASE_SCRIPT}:/pipeline/fastsurfer_long_phase.sh:ro"
+                -- /bin/bash /pipeline/fastsurfer_long_phase.sh "${STAGE}"
+            )
+        fi
+        docker_command+=(
             --fs_license /fs_license/license.txt
             --tid "${tid}"
-            --t1s
         )
-        docker_command+=("${container_t1s[@]}")
+        if [[ "${STAGE}" != cpu ]]; then
+            docker_command+=(--t1s "${container_t1s[@]}")
+        fi
         docker_command+=(--tpids)
         docker_command+=("${tpids[@]}")
         docker_command+=(
@@ -630,11 +702,20 @@ run_fastsurfer_longitudinal() {
             docker_command+=(--cpu)
         fi
 
-        echo "${subject_label}: running FastSurfer longitudinal stream for ${#tpids[@]} time point(s)."
+        echo "${subject_label}: running FastSurfer longitudinal stream (stage ${STAGE}) for ${#tpids[@]} time point(s)."
         printf 'Command:'
         printf ' %q' "${docker_command[@]}"
         printf '\n'
         "${docker_command[@]}"
+
+        if [[ "${STAGE}" == gpu ]]; then
+            if ! fastsurfer_long_segmented "${subject_label}" "${session_labels[@]}"; then
+                echo "${subject_label}: longitudinal FastSurfer segmentations are incomplete after container run." >&2
+                exit 1
+            fi
+            processed_subjects=$((processed_subjects + 1))
+            continue
+        fi
 
         subject_failed=0
         for session_label in "${session_labels[@]}"; do
@@ -666,6 +747,7 @@ if [[ "${SKIP_FASTSURFER}" -eq 0 ]]; then
             --fs_license "${FS_LICENSE_DIR}" \
             -t "${THREADS}" \
             --system "${SYSTEM}" \
+            "${FASTSURFER_STAGE_ARGS[@]}" \
             "${SUBJECT_ARGS[@]}" \
             "${CPU_ARGS[@]}"
     fi
@@ -682,6 +764,7 @@ if [[ "${SKIP_LST}" -eq 0 ]]; then
         --probability_map \
         --clipping "${CLIP_MIN}" "${CLIP_MAX}" \
         --lesion_threshold "${LESION_THRESHOLD}" \
+        "${LST_STAGE_ARGS[@]}" \
         "${SUBJECT_ARGS[@]}" \
         "${CPU_ARGS[@]}"
 fi

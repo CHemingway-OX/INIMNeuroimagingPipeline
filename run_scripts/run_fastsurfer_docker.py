@@ -105,7 +105,7 @@ def process_fastsurfer(dirs, n_container, derivatives_dir, bids_dir, pipeline_ar
                 sesID = getSessionID(path = MPRAGE[i])
 
                 # check availability of files and folders (create folders if necessary)
-                if not any('no_hypothal' in arg for arg in pipeline_arg) and 'LIT' not in dir:
+                if not any(('no_hypothal' in arg or 'surf_only' in arg) for arg in pipeline_arg) and 'LIT' not in dir:
                     if system == 'GH':
                         flair = str(MPRAGE[i]).replace('_MPRAGE.nii.gz', '_FLAIR.nii.gz')
                     elif system == 'BMC':
@@ -151,7 +151,7 @@ def process_fastsurfer(dirs, n_container, derivatives_dir, bids_dir, pipeline_ar
 
                 # change directory for docker container processing
                 MPRAGE[i] = str(MPRAGE[i]).replace(bids_dir,'/data')
-                if (not any('no_hypothal' in arg for arg in pipeline_arg)) and ('LIT' not in dir):
+                if (not any(('no_hypothal' in arg or 'surf_only' in arg) for arg in pipeline_arg)) and ('LIT' not in dir):
                     flair = str(flair).replace(bids_dir,'/data')
                 deriv_ses = str(deriv_ses).replace(derivatives_dir,'/output/')
 
@@ -160,7 +160,7 @@ def process_fastsurfer(dirs, n_container, derivatives_dir, bids_dir, pipeline_ar
                            "--fs_license", "/fs_license/license.txt"]
                 for option in pipeline_arg:
                     command.extend(shlex.split(option))
-                if not any('no_hypothal' in arg for arg in pipeline_arg) and 'LIT' not in dir:
+                if not any(('no_hypothal' in arg or 'surf_only' in arg) for arg in pipeline_arg) and 'LIT' not in dir:
                     command += ["--t2", flair]
                 if use_cpu:
                     command += ["--cpu"]
@@ -248,6 +248,11 @@ if __name__ == "__main__":
                         help='Comma-separated subject IDs to process, e.g. 001,002,sub-010.',
                         type=str,
                         default=None)
+    parser.add_argument('--stage',
+                        help='seg: segmentation only (GPU job); surf: surface reconstruction only, '
+                             'from an existing segmentation (CPU job); all: both (default).',
+                        choices=['all', 'seg', 'surf'],
+                        default='all')
 
 
     # read the arguments
@@ -258,7 +263,15 @@ if __name__ == "__main__":
     else:
         use_cpu = False
 
-    if args.do_segmentation and args.do_recon:
+    # --do_segmentation/--do_recon default to True and cannot be switched off, so
+    # --stage selects the split: FastSurfer finds its own segmentation for --surf_only.
+    if args.stage == 'seg':
+        pipeline_arg = ['--seg_only', '--no_hypothal ']
+        if args.no_cereb:
+            pipeline_arg.append('--no_cereb ')
+    elif args.stage == 'surf':
+        pipeline_arg = ['--surf_only']
+    elif args.do_segmentation and args.do_recon:
         pipeline_arg = ['']
         if args.no_cereb:
             pipeline_arg.append('--no_cereb ')

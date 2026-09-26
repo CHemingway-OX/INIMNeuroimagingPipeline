@@ -86,7 +86,7 @@ def filter_subject_dirs(dirs, subject_ids):
         return dirs
     return [x for x in dirs if getSubjectID(x) in subject_ids]
 
-def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesion_thresh, remove_temp=False, probmap=False, use_cpu=False, threads=8 , system = 'GH' , new_annotation = True):
+def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesion_thresh, remove_temp=False, probmap=False, use_cpu=False, threads=8 , system = 'GH' , new_annotation = True, annotation_only = False):
     """
     This function applies LST-AI lesion segmentation and also applies required pre-processing steps of the MPRAGE and FLAIR images.
     Pre-processing includes skull-stripping and image registration.
@@ -191,6 +191,9 @@ def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesio
                     print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: LST-AI lesion segmentation already exists, skip and proceed to next case...')
                     continue
                 prob_map = os.path.join(temp_dir_native, f'sub-{subID}_ses-{sesID}_space-FLAIR_seg-lst_prob.nii.gz')
+                if annotation_only and not (lst_done and os.path.isfile(prob_map)):
+                    raise RuntimeError(f'sub-{subID}_ses-{sesID}: LST-AI outputs or probability map missing; '
+                                       'run the LST-AI segmentation (GPU stage) first')
                 if lst_done and os.path.isfile(prob_map):
                     print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: LST-AI outputs exist, running only the missing annotation...')
                     run_annotation(temp_dir_native, bids_dir, subID, sesID)
@@ -315,6 +318,13 @@ if __name__ == "__main__":
                         help='Comma-separated subject IDs to process, e.g. 001,002,sub-010.',
                         type=str,
                         default=None)
+    stage = parser.add_mutually_exclusive_group()
+    stage.add_argument('--skip_annotation',
+                       help='Segment lesions only; the FastSurfer-based annotation needs surfaces (CPU stage).',
+                       action='store_true')
+    stage.add_argument('--annotation_only',
+                       help='Only annotate existing LST-AI outputs; starts no container.',
+                       action='store_true')
 
 
     # parser.add_argument('--new_annotation',
@@ -323,7 +333,10 @@ if __name__ == "__main__":
 
     # read the arguments
     args = parser.parse_args()
-    hdbet_home_dir()  # fail before any container starts
+    if args.skip_annotation:
+        args.new_annotation = False
+    if not args.annotation_only:
+        hdbet_home_dir()  # fail before any container starts
 
     if args.cpu:
         use_cpu = True
@@ -374,13 +387,14 @@ if __name__ == "__main__":
     if n_workers == 1:
         process_lst_ai(files[0], 0, derivatives_dir, input_path, args.clipping,
                        args.lesion_threshold, remove_temp, args.probability_map,
-                       use_cpu, args.threads, args.system, args.new_annotation)
+                       use_cpu, args.threads, args.system, args.new_annotation,
+                       args.annotation_only)
     else:
         with multiprocessing.Pool(processes=n_workers) as pool:
             results = [pool.apply_async(process_lst_ai, args=(batch, x, derivatives_dir,
                        input_path, args.clipping, args.lesion_threshold, remove_temp,
                        args.probability_map, use_cpu, args.threads, args.system,
-                       args.new_annotation)) for x, batch in enumerate(files)]
+                       args.new_annotation, args.annotation_only)) for x, batch in enumerate(files)]
             for result in results:
                 result.get()  # Propagate worker failures to the shell and Slurm.
     print('DONE!')

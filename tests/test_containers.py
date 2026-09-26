@@ -35,11 +35,26 @@ def host(path):
 def touch(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
-def outputs(base):
-    for rel in ('mri/aparc.DKTatlas+aseg.deep.mgz', 'surf/lh.pial.T1', 'surf/rh.pial.T1'):
+SEG = ('mri/aparc.DKTatlas+aseg.deep.mgz',)
+SURF = ('surf/lh.pial.T1', 'surf/rh.pial.T1')
+def outputs(base, rels=SEG + SURF):
+    for rel in rels:
         touch(base / rel)
+def values(flag):
+    i = args.index(flag) + 1
+    out = []
+    while i < len(args) and not args[i].startswith('--'):
+        out.append(args[i])
+        i += 1
+    return out
 if '/fastsurfer/run_fastsurfer.sh' in args:
-    outputs(host(args[args.index('--sd')+1]) / args[args.index('--sid')+1])
+    rels = SEG if '--seg_only' in args else SURF if '--surf_only' in args else SEG + SURF
+    outputs(host(args[args.index('--sd')+1]) / args[args.index('--sid')+1], rels)
+elif '/pipeline/fastsurfer_long_phase.sh' in args:
+    phase = args[args.index('/pipeline/fastsurfer_long_phase.sh') + 1]
+    rels = SEG if phase == 'gpu' else SURF
+    for sid in values('--tid') + values('--tpids'):
+        outputs(binds['/output'] / sid, rels)
 elif '/fastsurfer/long_fastsurfer.sh' in args:
     i = args.index('--tpids') + 1
     while i < len(args) and not args[i].startswith('--'):
@@ -160,6 +175,59 @@ class ContainerTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertTrue((link / 'surf/lh.pial.T1').is_file())
 
+    def test_longitudinal_gpu_then_cpu_stage(self):
+        result = self.pipeline('--long', '--stage', 'gpu')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 3)  # two conform calls, one GPU phase
+        gpu_call = calls[-1]
+        self.assertIn('--nv', gpu_call)
+        self.assertEqual(gpu_call[gpu_call.index('/pipeline/fastsurfer_long_phase.sh') + 1], 'gpu')
+        self.assertIn('--t1s', gpu_call)
+        link = self.bids / 'derivatives/fastsurfer_v2.4.2_docker_long/sub-001/ses-1/sub-001_ses-1'
+        self.assertFalse(link.exists())
+
+        result = self.pipeline('--long', '--stage', 'gpu')  # segmented: nothing to do
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls()), 3)
+
+        result = self.pipeline('--long', '--stage', 'cpu')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 4)  # no conforming in the cpu stage
+        cpu_call = calls[-1]
+        self.assertNotIn('--nv', cpu_call)
+        self.assertEqual(cpu_call[cpu_call.index('/pipeline/fastsurfer_long_phase.sh') + 1], 'cpu')
+        self.assertNotIn('--t1s', cpu_call)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue((link / 'surf/lh.pial.T1').is_file())
+
+    def test_cpu_stage_requires_gpu_stage(self):
+        result = self.pipeline('--long', '--stage', 'cpu')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('run --stage gpu first', result.stdout + result.stderr)
+        self.assertFalse(self.log.exists() and self.calls())
+
+    def test_cross_sectional_gpu_then_cpu_stage(self):
+        result = self.pipeline('--stage', 'gpu')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all('--seg_only' in c and '--nv' in c for c in calls))
+        result = self.pipeline('--stage', 'cpu')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()[2:]
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all('--surf_only' in c and '--nv' not in c and '--t2' not in c for c in calls))
+        result = self.pipeline('--stage', 'cpu')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls()), 4)
+
+    def test_unknown_stage_is_rejected(self):
+        result = self.pipeline('--stage', 'fast')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unknown --stage', result.stderr)
+
     def test_failed_longitudinal_pipeline_has_failure_status(self):
         result = self.pipeline('--long', FAKE_FAIL='1')
         self.assertNotEqual(result.returncode, 0)
@@ -210,6 +278,22 @@ class ContainerTests(unittest.TestCase):
         self.assertTrue(prob.endswith('sub-001_ses-1_space-FLAIR_seg-lst_prob.nii.gz'))
         self.assertTrue(fs_seg.startswith(str(self.base / 'fastsurfer')))
         self.assertTrue(out.endswith('sub-001_ses-1_space-flair_desc-annotated_fsseg.nii.gz'))
+
+    def test_lst_skip_annotation_needs_no_fastsurfer(self):
+        (self.base / 'fastsurfer' / 'sub-001' / 'ses-1' / 'sub-001_ses-1' / 'mri'
+         / 'aparc.DKTatlas+aseg.mapped.mgz').unlink()
+        result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
+                               '--subjects', '001', '--skip_annotation'])
+        self.assertNotIn('FastSurfer segmentation required', result.stderr)
+        self.assertGreaterEqual(len(self.calls()), 1)  # LST-AI container started
+
+    def test_lst_annotation_only_requires_lst_outputs(self):
+        result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
+                               '--subjects', '001', '--annotation_only'], HDBET_HOME='/nonexistent')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('run the LST-AI segmentation (GPU stage) first', result.stderr)
+        self.assertNotIn('HD-BET weights missing', result.stderr)
+        self.assertFalse(self.log.exists() and self.calls())
 
     def test_lst_fails_early_without_hdbet_weights(self):
         (self.hdbet_home / 'hd-bet_params' / '3.model').unlink()

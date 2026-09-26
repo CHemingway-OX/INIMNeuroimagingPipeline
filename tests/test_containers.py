@@ -70,12 +70,21 @@ class ContainerTests(unittest.TestCase):
                      'FASTSURFER_SIF', 'LST_SIF', 'LIT_SIF'):
             self.env.pop(name, None)
         self.env['CUDA_VISIBLE_DEVICES'] = '2,3'
+        self.hdbet_home = self.base / 'hdbet home'
+        (self.hdbet_home / 'hd-bet_params').mkdir(parents=True)
+        for fold in range(5):
+            (self.hdbet_home / 'hd-bet_params' / f'{fold}.model').touch()
+        self.env['HDBET_HOME'] = str(self.hdbet_home)
         self.bids = self.base / 'BIDS'
         for ses in ('1', '2'):
             anat = self.bids / 'sub-001' / f'ses-{ses}' / 'anat'
             anat.mkdir(parents=True)
             for contrast in ('T1w', 'FLAIR'):
                 (anat / f'sub-001_ses-{ses}_{contrast}.nii.gz').touch()
+            fs_mri = self.base / 'fastsurfer' / 'sub-001' / f'ses-{ses}' / f'sub-001_ses-{ses}' / 'mri'
+            fs_mri.mkdir(parents=True)
+            (fs_mri / 'aparc.DKTatlas+aseg.mapped.mgz').touch()
+        self.env['FASTSURFER_OUTPUT_DIR'] = str(self.base / 'fastsurfer')
         self.license = self.base / 'license'
         self.license.mkdir()
         (self.license / 'license.txt').touch()
@@ -164,6 +173,51 @@ class ContainerTests(unittest.TestCase):
         self.assertIn('42', result.stderr)
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual(self.calls()[0][-self.calls()[0][::-1].index('lst')-1], 'lst')
+        call = self.calls()[0]
+        self.assertIn(f'{self.hdbet_home}:/hdbet_home:ro', call)
+        self.assertEqual(call[call.index('--home') + 1], '/hdbet_home')
+
+    def test_lst_fails_early_without_fastsurfer_segmentation(self):
+        (self.base / 'fastsurfer' / 'sub-001' / 'ses-2' / 'sub-001_ses-2' / 'mri'
+         / 'aparc.DKTatlas+aseg.mapped.mgz').unlink()
+        result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
+                               '--subjects', '001'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FastSurfer segmentation required', result.stderr)
+        self.assertIn('sub-001_ses-2', result.stderr)
+        self.assertIn('--long', result.stderr)
+        self.assertFalse(self.log.exists() and self.calls())
+
+    def test_lst_reruns_only_missing_annotation(self):
+        import run_lst_docker
+        deriv = self.bids / 'derivatives' / 'lst-ai-v1.2.0_docker'
+        for ses in ('1', '2'):
+            anat = deriv / 'sub-001' / f'ses-{ses}' / 'anat'
+            temp = deriv / 'sub-001' / f'ses-{ses}' / 'temp'
+            anat.mkdir(parents=True)
+            temp.mkdir(parents=True)
+            for name in ('space-FLAIR_label-lesion_mask', 'space-FLAIR_desc-annotated_label-lesion_mask'):
+                (anat / f'sub-001_ses-{ses}_{name}.nii.gz').touch()
+            (temp / f'sub-001_ses-{ses}_space-FLAIR_seg-lst_prob.nii.gz').touch()
+        (deriv / 'sub-001' / 'ses-2' / 'temp' / 'sub-001_ses-2_space-flair_desc-annotated_fsseg.nii.gz').touch()
+        with patch.dict(os.environ, self.env, clear=True), \
+                patch.object(run_lst_docker, 'annotate_lesions_fsseg_variablethresh') as annotate:
+            run_lst_docker.process_lst_ai([str(self.bids / 'sub-001')], 0, str(deriv), str(self.bids),
+                                          [0.5, 99.5], 0)
+        self.assertFalse(self.log.exists() and self.calls())
+        annotate.assert_called_once()
+        prob, fs_seg, out = annotate.call_args.args
+        self.assertTrue(prob.endswith('sub-001_ses-1_space-FLAIR_seg-lst_prob.nii.gz'))
+        self.assertTrue(fs_seg.startswith(str(self.base / 'fastsurfer')))
+        self.assertTrue(out.endswith('sub-001_ses-1_space-flair_desc-annotated_fsseg.nii.gz'))
+
+    def test_lst_fails_early_without_hdbet_weights(self):
+        (self.hdbet_home / 'hd-bet_params' / '3.model').unlink()
+        result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
+                               '--subjects', '001'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('HD-BET weights missing', result.stderr)
+        self.assertFalse(self.log.exists() and self.calls())
 
     def test_lit_uses_packaged_code_without_host_checkout(self):
         from run_lesioninpainting import run_lit_container

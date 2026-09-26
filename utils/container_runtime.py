@@ -27,7 +27,7 @@ def image_path(tool):
 def docker_image(tool):
     return os.environ.get(f"{tool.upper()}_DOCKER_IMAGE", IMAGES[tool][1])
 
-def build_command(tool, args, binds=(), gpu=False, workdir=None):
+def build_command(tool, args, binds=(), gpu=False, workdir=None, home=None):
     name = runtime()
     env = os.environ.copy()
     # Do not inherit host Python paths or stale container-specific overrides.
@@ -45,6 +45,8 @@ def build_command(tool, args, binds=(), gpu=False, workdir=None):
             cmd += ["--volume", bind]
         if workdir:
             cmd += ["--workdir", workdir]
+        if home:
+            cmd += ["--env", f"HOME={home}"]
         for key in ("OMP_NUM_THREADS", "ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"):
             if key in env:
                 cmd += ["--env", f"{key}={env[key]}"]
@@ -56,6 +58,9 @@ def build_command(tool, args, binds=(), gpu=False, workdir=None):
         if not image.is_file():
             raise FileNotFoundError(f"Missing image: {image}. Run pixi run prepare-images first.")
         cmd = [name, "exec", "--cleanenv", "--no-mount", "home,cwd"]
+        if home:
+            # --no-mount home suppresses the --home mount; the caller binds it.
+            cmd += ["--home", home]
         if gpu:
             cmd += ["--nv"]
         prefix = "SINGULARITYENV_" if name == "singularity" else "APPTAINERENV_"
@@ -69,8 +74,8 @@ def build_command(tool, args, binds=(), gpu=False, workdir=None):
         cmd += ["--pwd", workdir or "/tmp", str(image), *map(str, args)]
     return cmd, env
 
-def run_container(tool, args, binds=(), gpu=False, workdir=None):
-    cmd, env = build_command(tool, args, binds, gpu, workdir)
+def run_container(tool, args, binds=(), gpu=False, workdir=None, home=None):
+    cmd, env = build_command(tool, args, binds, gpu, workdir, home)
     print("Command: " + shlex.join(cmd), flush=True)
     return subprocess.run(cmd, env=env, check=True)
 

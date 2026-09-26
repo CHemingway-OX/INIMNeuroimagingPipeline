@@ -586,7 +586,7 @@ run_fastsurfer_longitudinal() {
                     --bind "${conformed_dir}:/output"
                     --bind "${FS_LICENSE_DIR}:/fs_license:ro"
                     -- /bin/bash
-                    -lc 'if ! command -v mri_convert >/dev/null 2>&1; then for setup in /usr/local/freesurfer/SetUpFreeSurfer.sh /opt/freesurfer/SetUpFreeSurfer.sh /freesurfer/SetUpFreeSurfer.sh; do [[ -f "$setup" ]] && source "$setup" && break; done; fi; mri_convert --conform "$1" "$2"'
+                    -lc 'if ! command -v mri_convert >/dev/null 2>&1; then for setup in /usr/local/freesurfer/SetUpFreeSurfer.sh /opt/freesurfer/SetUpFreeSurfer.sh /freesurfer/SetUpFreeSurfer.sh; do [[ -f "$setup" ]] && source "$setup" && break; done; fi; export FS_LICENSE=/fs_license/license.txt; mri_convert --conform "$1" "$2"'
                     _
                     "/input/${input_rel}"
                     "/output/${conformed_name}"

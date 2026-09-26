@@ -16,6 +16,58 @@ from utils.container_runtime import run_container
 from annotate import annotate_lesions_fsseg_variablethresh
 from utils.utils import getSessionID, getSubjectID, split_list, getfileList, availability_check_systempref
 
+# HD-BET (inside LST-AI) loads its weights from ~/hd-bet_params. The image keeps
+# them in /root with mode 600, which a non-root Singularity user cannot read.
+HDBET_CONTAINER_HOME = "/hdbet_home"
+
+
+def hdbet_home_dir():
+    default = Path(os.environ.get("CONTAINER_DIR", "containers")).expanduser().resolve().parent / "models" / "hdbet_home"
+    home = Path(os.environ.get("HDBET_HOME", str(default))).expanduser().resolve()
+    missing = [n for n in range(5) if not (home / "hd-bet_params" / f"{n}.model").is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"HD-BET weights missing in {home}/hd-bet_params (folds {missing}). "
+            "Set HDBET_HOME to a directory containing hd-bet_params/0.model..4.model."
+        )
+    return home
+
+
+def fastsurfer_seg_path(bids_dir, subID, sesID):
+    fastsurfer_dir = os.environ.get('FASTSURFER_OUTPUT_DIR', os.path.join(bids_dir, 'derivatives', 'fastsurfer_v2.4.2_docker'))
+    return os.path.join(fastsurfer_dir, f'sub-{subID}', f'ses-{sesID}', f'sub-{subID}_ses-{sesID}', 'mri', 'aparc.DKTatlas+aseg.mapped.mgz')
+
+
+def annotation_path(temp_dir_native, subID, sesID):
+    return os.path.join(temp_dir_native, f'sub-{subID}_ses-{sesID}_space-flair_desc-annotated_fsseg.nii.gz')
+
+
+def missing_fastsurfer_segs(dirs, bids_dir, derivatives_dir):
+    """FastSurfer segmentations needed for annotation but absent, so failures surface before LST-AI runs."""
+    missing = []
+    for dir in dirs:
+        for t1w in getfileList(path=dir, suffix='*T1w*'):
+            t1w = str(t1w)
+            if '.nii.gz' not in t1w or 'gadolinium' in t1w:
+                continue
+            if not os.path.exists(t1w.replace('_T1w.nii.gz', '_FLAIR.nii.gz')):
+                continue
+            subID, sesID = getSubjectID(path=t1w), getSessionID(path=t1w)
+            temp_dir_native = os.path.join(derivatives_dir, f'sub-{subID}', f'ses-{sesID}', 'temp')
+            fs_seg = fastsurfer_seg_path(bids_dir, subID, sesID)
+            if not os.path.isfile(annotation_path(temp_dir_native, subID, sesID)) and not os.path.isfile(fs_seg):
+                missing.append(fs_seg)
+    return missing
+
+
+def run_annotation(temp_dir_native, bids_dir, subID, sesID):
+    print('performing new annotation ...')
+    prob_out = os.path.join(temp_dir_native, f'sub-{subID}_ses-{sesID}_space-FLAIR_seg-lst_prob.nii.gz')
+    fs_seg = fastsurfer_seg_path(bids_dir, subID, sesID)
+    out_annotated_native = annotation_path(temp_dir_native, subID, sesID)
+    print(prob_out, fs_seg, out_annotated_native)
+    annotate_lesions_fsseg_variablethresh(prob_out, fs_seg, out_annotated_native)
+
 
 def parse_subject_ids(subjects_arg):
     if not subjects_arg:
@@ -133,9 +185,15 @@ def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesio
                 # skip to next case if segmentation already exist
                 seg_file = os.path.join(deriv_ses_native, f'sub-{subID}_ses-{sesID}_space-FLAIR_label-lesion_mask.nii.gz')
                 seg_file_annot = os.path.join(deriv_ses_native, f'sub-{subID}_ses-{sesID}_space-FLAIR_desc-annotated_label-lesion_mask.nii.gz')
-                annotation_done = (not new_annotation or os.path.isfile(os.path.join(temp_dir_native, f'sub-{subID}_ses-{sesID}_space-flair_desc-annotated_fsseg.nii.gz')))
-                if os.path.exists(seg_file) and os.path.exists(seg_file_annot) and annotation_done:
+                annotation_done = (not new_annotation or os.path.isfile(annotation_path(temp_dir_native, subID, sesID)))
+                lst_done = os.path.exists(seg_file) and os.path.exists(seg_file_annot)
+                if lst_done and annotation_done:
                     print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: LST-AI lesion segmentation already exists, skip and proceed to next case...')
+                    continue
+                prob_map = os.path.join(temp_dir_native, f'sub-{subID}_ses-{sesID}_space-FLAIR_seg-lst_prob.nii.gz')
+                if lst_done and os.path.isfile(prob_map):
+                    print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: LST-AI outputs exist, running only the missing annotation...')
+                    run_annotation(temp_dir_native, bids_dir, subID, sesID)
                     continue
 
                 command = ["lst", "--t1", MPRAGE[i], "--flair", flair,
@@ -149,7 +207,8 @@ def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesio
                 run_container("lst", command, [
                     f"{Path(bids_dir).resolve()}:/custom_apps/lst_input:ro",
                     f"{Path(derivatives_dir).resolve()}:/custom_apps/lst_output",
-                ], gpu=not use_cpu)
+                    f"{hdbet_home_dir()}:{HDBET_CONTAINER_HOME}:ro",
+                ], gpu=not use_cpu, home=HDBET_CONTAINER_HOME)
 
                 # check if folder contains *seg-lst.nii.gz files, indicating that LST-AI successfully finished, and rename files
                 output_anat_files = os.listdir(deriv_ses_native)
@@ -187,13 +246,7 @@ def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesio
                         # assert prob_out and fs_seg and out_annotated_native
                         # annotate_lesions_fsseg_variablethresh(prob_out, fs_seg , out_annotated_native)
 
-                        print('performing new annotation ...')
-                        prob_out = os.path.join(temp_dir_native , f'sub-{subID}_ses-{sesID}_space-FLAIR_seg-lst_prob.nii.gz')
-                        fs_seg = os.path.join(os.environ.get('FASTSURFER_OUTPUT_DIR', bids_dir + '/derivatives/fastsurfer_v2.4.2_docker') + '/'  + f'sub-{subID}/ses-{sesID}/sub-{subID}_ses-{sesID}/mri/aparc.DKTatlas+aseg.mapped.mgz')
-                        out_annotated_native = os.path.join(temp_dir_native, f"sub-{subID}_ses-{sesID}_space-flair_desc-annotated_fsseg.nii.gz")
-
-                        print(prob_out , fs_seg , out_annotated_native)
-                        annotate_lesions_fsseg_variablethresh(prob_out, fs_seg , out_annotated_native)
+                        run_annotation(temp_dir_native, bids_dir, subID, sesID)
 
                 else:
                     raise RuntimeError(f'sub-{subID}_ses-{sesID}: LST-AI outputs are incomplete; intermediate files retained')
@@ -270,6 +323,7 @@ if __name__ == "__main__":
 
     # read the arguments
     args = parser.parse_args()
+    hdbet_home_dir()  # fail before any container starts
 
     if args.cpu:
         use_cpu = True
@@ -300,6 +354,16 @@ if __name__ == "__main__":
     dirs = [str(x) for x in dirs]
     dirs = [x for x in dirs if "sub-" in x]
     dirs = filter_subject_dirs(dirs, parse_subject_ids(args.subjects))
+
+    if args.new_annotation:
+        missing = missing_fastsurfer_segs(dirs, input_path, derivatives_dir)
+        if missing:
+            raise SystemExit(
+                'FastSurfer segmentation required for lesion annotation is missing:\n  '
+                + '\n  '.join(missing)
+                + '\nRun FastSurfer first. If FastSurfer ran longitudinally, pass --long to struct_bids.sh '
+                  '(or set FASTSURFER_OUTPUT_DIR).'
+            )
 
     dirs_missing = dirs
 

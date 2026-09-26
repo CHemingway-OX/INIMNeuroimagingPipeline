@@ -70,13 +70,33 @@ sbatch hpc/struct.sbatch 001
 # sbatch hpc/struct.sbatch 001 --long
 ```
 
-The processing template requests `jobs-gpu-long`, one full A100, eight CPUs,
-32 GiB RAM and 24 hours. These are pilot resource requests, not measured needs.
-The partition permits up to seven days; adjust `--time` after a pilot. Add
+The processing template requests `jobs-gpu`, one full A100, eight CPUs,
+32 GiB RAM and 2 hours. These are pilot resource requests, not measured needs.
+Longitudinal FastSurfer alone took about 1:45 h for two sessions, so a full run
+usually needs a longer `--time` (jobs-gpu allows 8 hours, `jobs-gpu-long` seven
+days). Pass `--time` on submission after a pilot. Add
 `--account=...` or other site-required submission options if necessary.
 The default `testing` partition has only 15 minutes, so templates explicitly
 choose a partition. No jobs are submitted by installation, image preparation,
 environment checks or tests.
+
+## Submit a cohort as an array job
+
+`hpc/submit_cohort.sh` submits one array task per subject and, afterwards, one
+dataset-wide report job (`afterany`, so reports cover subjects that succeeded):
+
+```bash
+hpc/submit_cohort.sh --subjects-file cohort.txt --max-parallel 2 --time 06:00:00 -- --long
+hpc/submit_cohort.sh --all --dry-run          # preview; every sub-* in BIDS_DIR
+```
+
+The subject list (one ID per line, `001` or `sub-001`, `#` comments allowed) is
+validated against `BIDS_DIR` and frozen to `logs/cohort_<timestamp>.txt`, because
+array task N reads line N. `--max-parallel` throttles concurrent tasks (`%K`);
+the jobs-gpu QoS allows at most 4 A100 per user and the cluster has 8 in total,
+so keep the default of 2 while others are queued. List failed tasks with
+`sacct -j <array id> --state=FAILED,TIMEOUT,OUT_OF_MEMORY -X` and resubmit only
+those subjects; finished stages are skipped on rerun.
 
 Jobs inherit the cluster GPU allocation: the runtime forwards
 `CUDA_VISIBLE_DEVICES` through Singularity's clean environment and uses `--nv`

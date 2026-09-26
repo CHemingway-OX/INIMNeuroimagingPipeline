@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --account=core-nrad-liebig
 #SBATCH --job-name=inim-report
 #SBATCH --partition=jobs-cpu
 #SBATCH --ntasks=1

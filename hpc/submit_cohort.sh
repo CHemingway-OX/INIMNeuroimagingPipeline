@@ -148,6 +148,7 @@ for arg in "${PIPELINE_ARGS[@]}"; do
     [[ "$arg" == "--long" ]] && report_args+=(--long)
 done
 
+echo "BIDS_DIR: ${BIDS_DIR}"
 echo "Subjects (${count}): ${valid[*]}"
 echo "Frozen list: $frozen"
 if [[ "$SPLIT" -eq 1 ]]; then

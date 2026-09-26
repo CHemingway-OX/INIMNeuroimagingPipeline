@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -150,6 +151,23 @@ class ContainerTests(unittest.TestCase):
         link = self.bids / 'derivatives/fastsurfer_v2.4.2_docker_long/sub-001/ses-1/sub-001_ses-1'
         self.assertTrue(link.is_symlink())
         self.assertTrue((link / 'surf/lh.pial.T1').is_file())
+
+    def test_conform_exports_mounted_license_inside_container(self):
+        result = self.pipeline('--long')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        command = self.calls()[0]
+        bootstrap = command[command.index('-lc') + 1]
+        # Execute the actual shell bootstrap against a stub that requires the
+        # license environment, rather than assuming a bind mount is sufficient.
+        converter = self.base / 'mri_convert'
+        converter.write_text('#!/bin/bash\n[[ "$FS_LICENSE" == /fs_license/license.txt ]] || exit 14\n')
+        converter.chmod(0o755)
+        env = dict(self.env, FS_LICENSE='/wrong/host/license.txt')
+        result = subprocess.run(['bash', '-lc',
+            'export PATH=' + shlex.quote(str(self.base)) + ':"$PATH"; ' + bootstrap,
+            '_', '/input/t1.nii.gz', '/output/t1.nii.gz'],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_failed_longitudinal_pipeline_has_failure_status(self):
         result = self.pipeline('--long', FAKE_FAIL='1')

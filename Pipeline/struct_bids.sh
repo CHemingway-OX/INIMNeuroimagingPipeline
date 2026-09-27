@@ -903,7 +903,8 @@ run_fastsurfer_longitudinal() {
             --threads_surf "${LONG_THREADS_SURF}"
         )
         if [[ "${CPU_FLAG}" -eq 1 ]]; then
-            docker_command+=(--cpu)
+            # FastSurfer 2.4 selects the device with --device; it has no --cpu flag.
+            docker_command+=(--device cpu --viewagg_device cpu)
         fi
 
         echo "${subject_label}: running FastSurfer longitudinal stream (stage ${STAGE}) for ${#tpids[@]} time point(s)."

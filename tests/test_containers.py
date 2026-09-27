@@ -47,6 +47,10 @@ def values(flag):
         out.append(args[i])
         i += 1
     return out
+FASTSURFER_SCRIPTS = ('/fastsurfer/run_fastsurfer.sh', '/fastsurfer/long_fastsurfer.sh',
+                      '/pipeline/fastsurfer_long_phase.sh')
+if '--cpu' in args and any(script in args for script in FASTSURFER_SCRIPTS):
+    sys.exit("ERROR: Flag '--cpu' unrecognized.")  # as FastSurfer 2.4.2
 if '/fastsurfer/run_fastsurfer.sh' in args:
     rels = SEG if '--seg_only' in args else SURF if '--surf_only' in args else SEG + SURF
     outputs(host(args[args.index('--sd')+1]) / args[args.index('--sid')+1], rels)
@@ -206,6 +210,7 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)  # no conforming in the cpu stage
         cpu_call = calls[-1]
         self.assertNotIn('--nv', cpu_call)
+        self.assertEqual(cpu_call[cpu_call.index('--device') + 1], 'cpu')
         self.assertEqual(cpu_call[cpu_call.index('/pipeline/fastsurfer_long_phase.sh') + 1], 'cpu')
         self.assertNotIn('--t1s', cpu_call)
         self.assertTrue(link.is_symlink())
@@ -228,6 +233,7 @@ class ContainerTests(unittest.TestCase):
         calls = self.calls()[2:]
         self.assertEqual(len(calls), 2)
         self.assertTrue(all('--surf_only' in c and '--nv' not in c and '--t2' not in c for c in calls))
+        self.assertTrue(all(c[c.index('--device') + 1] == 'cpu' for c in calls))
         result = self.pipeline('--stage', 'cpu')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.calls()), 4)

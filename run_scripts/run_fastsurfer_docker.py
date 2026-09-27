@@ -163,7 +163,8 @@ def process_fastsurfer(dirs, n_container, derivatives_dir, bids_dir, pipeline_ar
                 if not any(('no_hypothal' in arg or 'surf_only' in arg) for arg in pipeline_arg) and 'LIT' not in dir:
                     command += ["--t2", flair]
                 if use_cpu:
-                    command += ["--cpu"]
+                    # FastSurfer 2.4 selects the device with --device; it has no --cpu flag.
+                    command += ["--device", "cpu", "--viewagg_device", "cpu"]
                 command += ["--3T", "--threads", str(threads)]
                 run_container("fastsurfer", command, [
                     f"{Path(bids_dir).resolve()}:/data:ro",

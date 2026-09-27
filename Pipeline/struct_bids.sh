@@ -29,6 +29,8 @@ LONG_TMP_ROOT=""
 STAGE="all"
 RUN_SEL=0
 SEL_MANIFEST=""
+METRICS_DIR_ARG=""
+QC_DIR_ARG=""
 # Fixed rather than the job's CPU count: threads are part of the SEL provenance, and
 # --resume requires identical settings.
 SEL_THREADS="${SEL_THREADS:-8}"
@@ -79,6 +81,8 @@ Options:
   --skip-lit               Skip FS-LIT.
   --skip-qc                Skip QC HTML generation.
   --skip-summary           Skip metrics CSV generation.
+  --metrics-dir PATH       Metrics CSV directory. Default: derivatives/structural_pipeline/metrics
+  --qc-dir PATH            QC HTML directory. Default: derivatives/structural_pipeline/qc
   -h, --help               Show this help.
 EOF
 }
@@ -226,6 +230,14 @@ while [[ $# -gt 0 ]]; do
             SEL_MANIFEST="${1#*=}"
             shift
             ;;
+        --metrics-dir)
+            METRICS_DIR_ARG="$2"
+            shift 2
+            ;;
+        --qc-dir)
+            QC_DIR_ARG="$2"
+            shift 2
+            ;;
         --container-runtime)
             export CONTAINER_RUNTIME="$2"
             shift 2
@@ -321,8 +333,9 @@ command -v "${PYTHON_BIN}" >/dev/null 2>&1 || { echo "Python interpreter not fou
 
 PIPELINE_ROOT="${BIDS_DIR}/derivatives/${STRUCT_NAME}"
 LOG_DIR="${PIPELINE_ROOT}/logs"
-QC_DIR="${PIPELINE_ROOT}/qc"
-METRICS_DIR="${PIPELINE_ROOT}/metrics"
+# Per-subject directories let concurrent report jobs avoid the shared CSV and HTML index.
+QC_DIR="${QC_DIR_ARG:-${PIPELINE_ROOT}/qc}"
+METRICS_DIR="${METRICS_DIR_ARG:-${PIPELINE_ROOT}/metrics}"
 SEL_DIR="${PIPELINE_ROOT}/sel_deformation"
 mkdir -p "${LOG_DIR}" "${QC_DIR}" "${METRICS_DIR}"
 
@@ -729,12 +742,12 @@ ensure_longitudinal_output_link() {
 
     mkdir -p "${link_parent}"
     if [[ -L "${link_path}" ]]; then
-        ln -sfn "${target}" "${link_path}"
+        ln -sfnr "${target}" "${link_path}"
     elif [[ -e "${link_path}" ]]; then
         echo "Existing non-symlink FastSurfer output remains at ${link_path}" >&2
         echo "Longitudinal output for this time point is at ${target}" >&2
     else
-        ln -s "${target}" "${link_path}"
+        ln -sr "${target}" "${link_path}"
     fi
 }
 

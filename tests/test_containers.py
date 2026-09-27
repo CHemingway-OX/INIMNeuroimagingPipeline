@@ -186,6 +186,7 @@ class ContainerTests(unittest.TestCase):
         self.assertIn('--nv', calls[-1])
         link = self.bids / 'derivatives/fastsurfer_v2.4.2_docker_long/sub-001/ses-1/sub-001_ses-1'
         self.assertTrue(link.is_symlink())
+        self.assertFalse(os.path.isabs(os.readlink(link)))  # valid after copying off the HPC
         self.assertTrue((link / 'surf/lh.pial.T1').is_file())
 
     def test_longitudinal_gpu_then_cpu_stage(self):

@@ -128,6 +128,45 @@ limitations and the standalone chronic lesion volumetry are described in
 `Pipeline/longitudinal_lesion_research.md`. It is a research adaptation without
 calibration: two visits yield candidates only.
 
+## Process a cohort that lives on a workstation
+
+`hpc/cohort_driver.py` runs on the workstation that holds the BIDS cohort (for
+example WSL2) and streams it through the HPC, so HPC storage holds only a few
+subjects at a time. The HPC never needs to reach the workstation. Per subject
+it uploads T1w/FLAIR images, their JSON sidecars and `sub-<ID>_sessions.tsv`,
+submits GPU job -> CPU job -> per-subject report, fetches the derivatives when the
+report succeeded, verifies every file by SHA-256 and only then deletes the
+subject from the HPC. SEL deformation fields (`syn_*Warp.nii.gz`) are not
+fetched.
+
+The workstation needs Python 3.8+, ssh with a key for `core-mgm` and a copy of
+the script (for example this repository). Start it in `tmux` or `screen`:
+
+```bash
+python3 hpc/cohort_driver.py \
+  --local-bids /mnt/e/COHORT/BIDS --local-out /mnt/e/COHORT/hpc_results \
+  --remote-bids /data2/core-nrad-liebig/chemingw/INIM_NIPipeline/staging/COHORT \
+  --all -- --long --SEL
+python3 hpc/cohort_driver.py ... --status          # progress, job ids, failures
+python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
+```
+
+* `--remote-bids` must be a dedicated staging directory: the driver marks it
+  and refuses a non-empty directory it did not create, because it deletes
+  subjects there after fetching.
+* `--local-out` receives `derivatives/...` as on the HPC plus
+  `derivatives/structural_pipeline/metrics/cohort_structural_metrics.csv`
+  (merged per-subject metrics) and per-subject QC in `qc/sub-<ID>/`. Driver state,
+  log and Slurm logs are in `--local-out/.cohort_driver/`.
+* `--max-gpu` (default 2) bounds subjects waiting for or using a GPU,
+  `--max-on-hpc` (default 6) subjects with data on the HPC. Failed subjects keep
+  their HPC data for inspection; after `--max-failed` (default 3) failures no
+  new subjects start.
+* Defaults `--gpu-time 04:00:00` and `--cpu-time 06:00:00` suit 4-5 sessions per
+  subject (LIT takes about 15 min and LST-AI about 6 min per session).
+* Stopping and restarting is safe: submitted subjects are picked up again, and
+  unreachable ssh (VPN) is retried at the next poll.
+
 Jobs inherit the cluster GPU allocation: the runtime forwards
 `CUDA_VISIBLE_DEVICES` through Singularity's clean environment and uses `--nv`
 only for GPU stages. Do not hard-code GPU indices. The pipeline runs in the

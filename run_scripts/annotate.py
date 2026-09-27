@@ -23,6 +23,7 @@ MSMask labels:
 import shlex
 import subprocess
 import os
+import tempfile
 from pathlib import Path
 
 import nibabel as nib
@@ -321,14 +322,15 @@ def annotate_lesions_fsseg_variablethresh(probmap, fs_seg , out_annotated_native
     fs_seg_ants = ants.image_read(fs_seg)
     probmap_ants = ants.image_read(probmap)
     fs_seg_ants = fs_seg_ants.resample_image_to_target(probmap_ants , interp_type = 'nearestNeighbor')
-    ants.image_write(fs_seg_ants , fs_seg.split('.')[0] + '_reshaped.nii.gz')
-    # Load probmap and fs seg
+    # Private temporary file: the former fs_seg.split('.')[0] + '_reshaped.nii.gz' cut the path at
+    # the first dot (fastsurfer_v2.4.2...), so concurrent jobs shared one file in derivatives/.
+    with tempfile.TemporaryDirectory(prefix='annotate_') as tmp:
+        reshaped = os.path.join(tmp, 'fs_seg_reshaped.nii.gz')
+        ants.image_write(fs_seg_ants , reshaped)
+        fs_seg = nib.load(reshaped).get_fdata()
+    # Load probmap
     probmap_nib = nib.load(probmap)
     probmap = probmap_nib.get_fdata()
-    
-
-    
-    fs_seg = nib.load(fs_seg.split('.')[0] + '_reshaped.nii.gz').get_fdata()
     fu = np.vectorize(lambda x: freesurfer_to_msmask.get(x, 0))
     fs_seg_mapped = fu(fs_seg)
 

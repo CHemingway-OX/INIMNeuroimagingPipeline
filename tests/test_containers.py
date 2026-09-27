@@ -400,11 +400,19 @@ class ContainerTests(unittest.TestCase):
         stats = self.base / 'aseg.stats'
         stats.touch()
         table = self.base / 'volumes.tsv'
-        result = self.run_cli(['bash', 'scripts/asegstats2table', '--inputs', str(stats),
+        # Called directly: collect_structural_metrics finds it with shutil.which, which needs +x.
+        result = self.run_cli([str(ROOT / 'scripts/asegstats2table'), '--inputs', str(stats),
                                '--tablefile', str(table), '--meas', 'volume', '--delimiter', 'tab'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('12.5', table.read_text())
         self.assertNotIn('--nv', self.calls()[0])
+
+    def test_metrics_resolve_container_asegstats2table(self):
+        from Pipeline.collect_structural_metrics import resolve_asegstats2table
+        wrapper = ROOT / 'scripts' / 'asegstats2table'
+        with patch.dict(os.environ, dict(self.env, ASEGSTATS2TABLE=str(wrapper)), clear=True):
+            executable, _ = resolve_asegstats2table()
+        self.assertEqual(executable, str(wrapper.resolve()))
 
 if __name__ == '__main__':
     unittest.main()

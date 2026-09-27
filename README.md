@@ -119,6 +119,15 @@ keep the default of 2 while others are queued. `--max-parallel-cpu` (default 8,
 `sacct -j <gpu id>,<cpu id> --state=FAILED,TIMEOUT,OUT_OF_MEMORY,CANCELLED -X`
 and resubmit only those subjects; finished stages are skipped on rerun.
 
+### Slowly expanding lesions (SEL)
+
+Add `--SEL` to a longitudinal run (`-- --long --SEL`) for the deformation-based
+SEL analysis ported from TWIN_MRI. It runs in the CPU job and needs scan dates in
+`sub-<ID>/sub-<ID>_sessions.tsv` (`session_id`, `acq_time`). Method, inputs,
+limitations and the standalone chronic lesion volumetry are described in
+`Pipeline/longitudinal_lesion_research.md`. It is a research adaptation without
+calibration: two visits yield candidates only.
+
 Jobs inherit the cluster GPU allocation: the runtime forwards
 `CUDA_VISIBLE_DEVICES` through Singularity's clean environment and uses `--nv`
 only for GPU stages. Do not hard-code GPU indices. The pipeline runs in the

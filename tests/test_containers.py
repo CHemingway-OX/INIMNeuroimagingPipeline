@@ -66,6 +66,15 @@ elif any('mri_convert --conform' in arg for arg in args):
     touch(host(args[-1]))
 """
 
+FAKE_SEL = r"""
+import json, os, sys
+args = sys.argv[1:]
+manifest = args[args.index('--manifest') + 1]
+with open(os.environ['FAKE_SEL_LOG'], 'a') as out:
+    out.write(json.dumps({'args': args, 'manifest': open(manifest).read()}) + '\n')
+"""
+
+
 class ContainerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='inim container test ')
@@ -80,7 +89,7 @@ class ContainerTests(unittest.TestCase):
         self.env = dict(os.environ, CONTAINER_RUNTIME='singularity', CONTAINER_DIR=str(self.base),
                         PATH=str(self.base) + os.pathsep + os.environ['PATH'], FAKE_LOG=str(self.log),
                         PYTHON_BIN=sys.executable)
-        for name in ('FAKE_FAIL', 'SLURM_JOB_ID', 'LIT_REPO', 'FASTSURFER_OUTPUT_DIR',
+        for name in ('FAKE_FAIL', 'SEL_SCRIPT', 'SEL_THREADS', 'SLURM_JOB_ID', 'LIT_REPO', 'FASTSURFER_OUTPUT_DIR',
                      'STRUCT_BIDS_RUN_LOG', 'STRUCT_BIDS_STATUS_FILE', 'STRUCT_BIDS_RUN_ID',
                      'FASTSURFER_SIF', 'LST_SIF', 'LIT_SIF'):
             self.env.pop(name, None)
@@ -227,6 +236,70 @@ class ContainerTests(unittest.TestCase):
         result = self.pipeline('--stage', 'fast')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Unknown --stage', result.stderr)
+
+    def sel_fixture(self, acq_times=('2024-01-02T10:15:00', '2025-01-03')):
+        lst = self.bids / 'derivatives' / 'lst-ai-v1.2.0_docker' / 'sub-001'
+        for ses in ('1', '2'):
+            prefix = f'sub-001_ses-{ses}'
+            (lst / f'ses-{ses}' / 'anat').mkdir(parents=True, exist_ok=True)
+            (lst / f'ses-{ses}' / 'temp').mkdir(parents=True, exist_ok=True)
+            (lst / f'ses-{ses}' / 'anat' / f'{prefix}_space-FLAIR_label-lesion_mask.nii.gz').touch()
+            (lst / f'ses-{ses}' / 'temp' / f'{prefix}_space-flair_brainmask.nii.gz').touch()
+        if acq_times is not None:
+            rows = ''.join(f'ses-{i}\t{t}\n' for i, t in enumerate(acq_times, 1))
+            (self.bids / 'sub-001' / 'sub-001_sessions.tsv').write_text('session_id\tacq_time\n' + rows)
+        script = self.base / 'fake_sel.py'
+        script.write_text(FAKE_SEL)
+        self.sel_log = self.base / 'sel.jsonl'
+        return dict(SEL_SCRIPT=str(script), FAKE_SEL_LOG=str(self.sel_log), PYTHON_BIN=sys.executable)
+
+    def sel_calls(self):
+        if not self.sel_log.exists():
+            return []
+        return [json.loads(line) for line in self.sel_log.read_text().splitlines()]
+
+    def sel_pipeline(self, stage, env, *extra):
+        return self.pipeline('--skip-fastsurfer', '--long', '--SEL', '--stage', stage, *extra, **env)
+
+    def manifest_rows(self, call):
+        lines = call['manifest'].splitlines()
+        header = lines[0].split('\t')
+        return [dict(zip(header, line.split('\t'))) for line in lines[1:]]
+
+    def test_sel_manifest_uses_sessions_tsv_dates(self):
+        result = self.sel_pipeline('cpu', self.sel_fixture())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.sel_calls()
+        self.assertEqual(len(calls), 1)
+        rows = self.manifest_rows(calls[0])
+        self.assertEqual([r['date'] for r in rows], ['2024-01-02', '2025-01-03'])
+        self.assertTrue(rows[0]['lesion'].endswith('sub-001_ses-1_space-FLAIR_label-lesion_mask.nii.gz'))
+        self.assertTrue(rows[1]['brain_mask'].endswith('sub-001_ses-2_space-flair_brainmask.nii.gz'))
+        args = calls[0]['args']
+        self.assertEqual(args[args.index('--threads') + 1], '8')
+        self.assertNotIn('--resume', args)
+
+    def test_sel_without_sessions_tsv_leaves_dates_to_sidecars(self):
+        result = self.sel_pipeline('cpu', self.sel_fixture(acq_times=None))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([r['date'] for r in self.manifest_rows(self.sel_calls()[0])], ['', ''])
+
+    def test_sel_rejects_non_iso_session_date(self):
+        result = self.sel_pipeline('cpu', self.sel_fixture(acq_times=('02.01.2024', '2025-01-03')))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('is not ISO 8601', result.stdout + result.stderr)
+        self.assertEqual(self.sel_calls(), [])
+
+    def test_sel_waits_for_cpu_stage(self):
+        result = self.sel_pipeline('gpu', self.sel_fixture())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('SEL analysis runs in the cpu stage', result.stdout)
+        self.assertEqual(self.sel_calls(), [])
+
+    def test_sel_requires_long(self):
+        result = self.pipeline('--skip-fastsurfer', '--SEL', **self.sel_fixture())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--SEL requires --long', result.stderr)
 
     def test_failed_longitudinal_pipeline_has_failure_status(self):
         result = self.pipeline('--long', FAKE_FAIL='1')

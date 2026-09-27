@@ -13,5 +13,18 @@
     "run_scripts/annotate.py": "070190ff7231380e4f49e18925871f715b06ffd216c6b0ba015b91110a1c8446",
     "utils/utils.py": "4afc0a2f20f75d18efd5374db69932cd58fe7994b9819e7018606fa52741cfc0",
     "utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "sel_port": {
+    "source_repository": "TWIN_MRI",
+    "source_head": "11b3628159324a11bacab57b1ad070ceb641d11f",
+    "copied_on": "2026-09-27",
+    "note": "Committed source files; hashes describe source bytes before HPC edits (lock handling, test paths, docs). test_lesion_longitudinal.py moved to tests/.",
+    "files": {
+      "Pipeline/lesion_longitudinal_common.py": "e8599059e79e217c67aafd9d3d78df104352ae6d0a18e2079eb9776a4879b5d8",
+      "Pipeline/sel_deformation_analysis.py": "5db641d8c29199abf95ba9b20466d45125bd9e136eab15ed5ecb60c69aa51588",
+      "Pipeline/chronic_lesion_volume_analysis.py": "757968285e3bb98fbd085a13cdab5900adfe7674bc59393d666596221c571098",
+      "Pipeline/test_lesion_longitudinal.py": "04f23ed98d7cac7529115300061fdb625e7922e0dfa327b4e31ef330d3efbec9",
+      "Pipeline/longitudinal_lesion_research.md": "2e07a456528c70341d523fe29c874e65de33fa77f22be69a9cf0560e48a8413a"
+    }
   }
 }

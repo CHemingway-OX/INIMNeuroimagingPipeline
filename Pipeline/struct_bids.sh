@@ -27,6 +27,11 @@ SKIP_SUMMARY=0
 LONG_FASTSURFER=0
 LONG_TMP_ROOT=""
 STAGE="all"
+RUN_SEL=0
+SEL_MANIFEST=""
+# Fixed rather than the job's CPU count: threads are part of the SEL provenance, and
+# --resume requires identical settings.
+SEL_THREADS="${SEL_THREADS:-8}"
 
 FASTSURFER_NAME="fastsurfer_v2.4.2_docker"
 FASTSURFER_LONG_NAME="fastsurfer_v2.4.2_docker_long"
@@ -62,6 +67,10 @@ Options:
   --stage NAME             all (default), gpu or cpu. gpu: FastSurfer segmentation, LST-AI
                            segmentation and FS-LIT. cpu: FastSurfer surfaces and LST-AI
                            annotation, without containers requesting a GPU. Run gpu first.
+  --SEL                    Run the deformation-based SEL analysis (requires --long; cpu or all
+                           stage). Scan dates come from sub-<ID>/sub-<ID>_sessions.tsv
+                           (session_id, acq_time), otherwise from T1w/FLAIR JSON sidecars.
+  --sel-manifest PATH      Single-subject SEL TSV manifest override.
   --cpu                    Run wrappers in CPU mode where supported.
   --container-runtime NAME docker (default), singularity or apptainer; also CONTAINER_RUNTIME.
   --foreground             Keep the pipeline attached to the current shell.
@@ -205,6 +214,18 @@ while [[ $# -gt 0 ]]; do
             STAGE="${1#*=}"
             shift
             ;;
+        --SEL|--sel)
+            RUN_SEL=1
+            shift
+            ;;
+        --sel-manifest)
+            SEL_MANIFEST="$2"
+            shift 2
+            ;;
+        --sel-manifest=*)
+            SEL_MANIFEST="${1#*=}"
+            shift
+            ;;
         --container-runtime)
             export CONTAINER_RUNTIME="$2"
             shift 2
@@ -266,6 +287,15 @@ BIDS_DIR="${BIDS_DIR%/}"
 [[ -f "${FS_LICENSE_DIR}/license.txt" ]] || { echo "Missing ${FS_LICENSE_DIR}/license.txt" >&2; exit 1; }
 BIDS_DIR="$(cd "${BIDS_DIR}" && pwd)"
 FS_LICENSE_DIR="$(cd "${FS_LICENSE_DIR}" && pwd)"
+if [[ "${RUN_SEL}" -eq 1 && "${LONG_FASTSURFER}" -ne 1 ]]; then
+    echo "--SEL requires --long." >&2
+    exit 1
+fi
+if [[ -n "${SEL_MANIFEST}" ]]; then
+    [[ "${RUN_SEL}" -eq 1 ]] || { echo "--sel-manifest requires --SEL." >&2; exit 1; }
+    [[ -f "${SEL_MANIFEST}" ]] || { echo "SEL manifest not found: ${SEL_MANIFEST}" >&2; exit 1; }
+    SEL_MANIFEST="$(cd "$(dirname "${SEL_MANIFEST}")" && pwd)/$(basename "${SEL_MANIFEST}")"
+fi
 case "${STAGE}" in
     all) ;;
     gpu)
@@ -293,6 +323,7 @@ PIPELINE_ROOT="${BIDS_DIR}/derivatives/${STRUCT_NAME}"
 LOG_DIR="${PIPELINE_ROOT}/logs"
 QC_DIR="${PIPELINE_ROOT}/qc"
 METRICS_DIR="${PIPELINE_ROOT}/metrics"
+SEL_DIR="${PIPELINE_ROOT}/sel_deformation"
 mkdir -p "${LOG_DIR}" "${QC_DIR}" "${METRICS_DIR}"
 
 RUN_ID="${STRUCT_BIDS_RUN_ID:-$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID:-local}_${SLURM_ARRAY_TASK_ID:-0}_$$}"
@@ -359,10 +390,15 @@ LST_SCRIPT="${REPO_ROOT}/run_scripts/run_lst_docker.py"
 LIT_SCRIPT="${REPO_ROOT}/run_scripts/run_lesioninpainting.py"
 QC_SCRIPT="${REPO_ROOT}/Pipeline/generate_structural_qc.py"
 METRICS_SCRIPT="${REPO_ROOT}/Pipeline/collect_structural_metrics.py"
+SEL_SCRIPT="${SEL_SCRIPT:-${REPO_ROOT}/Pipeline/sel_deformation_analysis.py}"
 
 for script_path in "${FASTSURFER_SCRIPT}" "${LST_SCRIPT}" "${LIT_SCRIPT}" "${QC_SCRIPT}" "${METRICS_SCRIPT}"; do
     [[ -f "${script_path}" ]] || { echo "Required script not found: ${script_path}" >&2; exit 1; }
 done
+if [[ "${RUN_SEL}" -eq 1 && ! -f "${SEL_SCRIPT}" ]]; then
+    echo "Required script not found: ${SEL_SCRIPT}" >&2
+    exit 1
+fi
 
 CPU_ARGS=()
 if [[ "${CPU_FLAG}" -eq 1 ]]; then
@@ -469,6 +505,174 @@ find_primary_t1w() {
         echo "Multiple T1w candidates in ${anat_dir}; using ${t1w_candidates[0]}" >&2
     fi
     printf '%s\n' "${t1w_candidates[0]}"
+}
+
+find_primary_flair() {
+    local anat_dir="$1"
+    local candidate
+    local flair_candidates=()
+
+    for candidate in "${anat_dir}"/*_FLAIR.nii.gz "${anat_dir}"/*_FLAIR.nii; do
+        [[ -e "${candidate}" ]] || continue
+        flair_candidates+=("${candidate}")
+    done
+
+    if [[ "${#flair_candidates[@]}" -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ "${#flair_candidates[@]}" -gt 1 ]]; then
+        echo "Multiple FLAIR candidates in ${anat_dir}; using ${flair_candidates[0]}" >&2
+    fi
+    printf '%s\n' "${flair_candidates[0]}"
+}
+
+# Scan date (YYYY-MM-DD) of a session from the BIDS sessions file; empty when the file,
+# the session row or acq_time is absent, so the SEL tool falls back to JSON sidecars.
+session_scan_date() {
+    local subject_label="$1"
+    local session_label="$2"
+    local sessions_tsv="${BIDS_DIR}/${subject_label}/${subject_label}_sessions.tsv"
+    local value
+
+    [[ -f "${sessions_tsv}" ]] || return 0
+    value="$(awk -F '\t' -v session="${session_label}" '
+        { sub(/\r$/, "") }
+        NR == 1 { for (i = 1; i <= NF; i++) column[$i] = i; next }
+        ("session_id" in column) && ("acq_time" in column) && $column["session_id"] == session {
+            print $column["acq_time"]; exit
+        }' "${sessions_tsv}")"
+    if [[ -z "${value}" || "${value}" == "n/a" ]]; then
+        return 0
+    fi
+    if [[ ! "${value}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}([T\ ].*)?$ ]]; then
+        echo "${subject_label}_${session_label}: acq_time '${value}' in ${sessions_tsv} is not ISO 8601 (YYYY-MM-DD[Thh:mm:ss])" >&2
+        return 1
+    fi
+    printf '%s\n' "${value:0:10}"
+}
+
+sel_manifest_subject() {
+    local manifest="$1"
+    local subjects=()
+
+    [[ "${manifest}" == *.tsv ]] || {
+        echo "--sel-manifest currently requires a TSV file: ${manifest}" >&2
+        return 1
+    }
+    mapfile -t subjects < <(awk -F '\t' 'NR > 1 && $1 != "" {print $1}' "${manifest}" | sort -u)
+    if [[ "${#subjects[@]}" -ne 1 || ! "${subjects[0]}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "SEL manifest must contain exactly one safe subject identifier: ${manifest}" >&2
+        return 1
+    fi
+    printf '%s\n' "${subjects[0]}"
+}
+
+run_sel_manifest() {
+    local manifest="$1"
+    local subject_label="$2"
+    local output_dir="${SEL_DIR}/${subject_label}"
+    local sel_args=(
+        "${PYTHON_BIN}" "${SEL_SCRIPT}"
+        --manifest "${manifest}"
+        --output "${output_dir}"
+        --threads "${SEL_THREADS}"
+    )
+
+    # The SEL tool refuses active locks and removes those of ended Slurm jobs itself.
+    if [[ -f "${output_dir}/provenance.json" ]]; then
+        sel_args+=(--resume)
+    fi
+
+    run_step "SEL deformation analysis: ${subject_label}" "${sel_args[@]}"
+}
+
+run_sel_analyses() {
+    local subject_dir
+    local subject_label
+    local session_dir
+    local session_label
+    local anat_dir
+    local t1w
+    local flair
+    local lesion
+    local brain
+    local scan_date
+    local manifest
+    local manifest_tmp
+    local custom_subject
+    local i
+    local session_labels=()
+    local t1w_paths=()
+    local flair_paths=()
+
+    mkdir -p "${SEL_DIR}/manifests"
+
+    if [[ -n "${SEL_MANIFEST}" ]]; then
+        custom_subject="$(sel_manifest_subject "${SEL_MANIFEST}")"
+        if ! subject_requested "${custom_subject}"; then
+            echo "SEL manifest subject ${custom_subject} is excluded by --subjects." >&2
+            return 1
+        fi
+        run_sel_manifest "${SEL_MANIFEST}" "${custom_subject}"
+        return
+    fi
+
+    for subject_dir in "${BIDS_DIR}"/sub-*; do
+        [[ -d "${subject_dir}" ]] || continue
+        subject_label="$(basename "${subject_dir}")"
+        subject_requested "${subject_label}" || continue
+
+        session_labels=()
+        t1w_paths=()
+        flair_paths=()
+        for session_dir in "${subject_dir}"/ses-*; do
+            [[ -d "${session_dir}" ]] || continue
+            session_label="$(basename "${session_dir}")"
+            anat_dir="${session_dir}/anat"
+            [[ -d "${anat_dir}" ]] || continue
+            if ! t1w="$(find_primary_t1w "${anat_dir}")"; then
+                continue
+            fi
+            if ! flair="$(find_primary_flair "${anat_dir}")"; then
+                continue
+            fi
+            session_labels+=("${session_label}")
+            t1w_paths+=("${t1w}")
+            flair_paths+=("${flair}")
+        done
+
+        if [[ "${#session_labels[@]}" -lt 2 ]]; then
+            echo "${subject_label}: fewer than two sessions with T1w and FLAIR; skipping SEL analysis."
+            continue
+        fi
+
+        manifest="${SEL_DIR}/manifests/${subject_label}_longitudinal.tsv"
+        manifest_tmp="${manifest}.tmp"
+        printf 'subject\tsession\tdate\tt1\tflair\tlesion\tbrain_mask\n' > "${manifest_tmp}"
+        for i in "${!session_labels[@]}"; do
+            session_label="${session_labels[i]}"
+            lesion="${LST_DIR}/${subject_label}/${session_label}/anat/${subject_label}_${session_label}_space-FLAIR_label-lesion_mask.nii.gz"
+            brain="${LST_DIR}/${subject_label}/${session_label}/temp/${subject_label}_${session_label}_space-flair_brainmask.nii.gz"
+            if [[ ! -f "${brain}" ]]; then
+                brain="${LST_DIR}/${subject_label}/${session_label}/temp/${subject_label}_${session_label}_space-FLAIR_brainmask.nii.gz"
+            fi
+            [[ -f "${lesion}" ]] || {
+                echo "${subject_label}_${session_label}: SEL lesion mask not found: ${lesion}" >&2
+                return 1
+            }
+            [[ -f "${brain}" ]] || {
+                echo "${subject_label}_${session_label}: SEL FLAIR brain mask not found in ${LST_DIR}/${subject_label}/${session_label}/temp" >&2
+                return 1
+            }
+            scan_date="$(session_scan_date "${subject_label}" "${session_label}")"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${subject_label}" "${session_label}" "${scan_date}" "${t1w_paths[i]}" "${flair_paths[i]}" "${lesion}" "${brain}" \
+                >> "${manifest_tmp}"
+        done
+        mv "${manifest_tmp}" "${manifest}"
+        run_sel_manifest "${manifest}" "${subject_label}"
+    done
 }
 
 fastsurfer_long_timepoint_dir() {
@@ -777,6 +981,14 @@ if [[ "${SKIP_LIT}" -eq 0 ]]; then
         -d "${LST_DIR}" \
         "${SUBJECT_ARGS[@]}" \
         --dilate "${DILATE}"
+fi
+
+if [[ "${RUN_SEL}" -eq 1 ]]; then
+    if [[ "${STAGE}" == gpu ]]; then
+        echo "SEL analysis runs in the cpu stage (ANTs only, after the LST-AI masks exist)."
+    else
+        run_sel_analyses
+    fi
 fi
 
 if [[ "${SKIP_SUMMARY}" -eq 0 ]]; then

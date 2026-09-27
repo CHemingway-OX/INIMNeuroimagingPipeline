@@ -31,9 +31,21 @@ def run_lit_container(input_image: str, mask_image: str, output_directory: str, 
         if missing:
             raise FileNotFoundError("LIT_REPO override is missing code/weights: " + ", ".join(missing))
         binds.append(f"{repo}:/inpainting:ro")
-    run_container("lit", ["/bin/bash", "/inpainting/run_lit.sh", "-i", input_image,
-                  "-m", mask_image, "-o", output_directory, "--dilate", str(dilate)],
-                  binds, gpu=True, workdir="/inpainting")
+        command = ["/bin/bash", "/inpainting/run_lit.sh", "-i", input_image,
+                   "-m", mask_image, "-o", output_directory, "--dilate", str(dilate)]
+    else:
+        # The image's run_lit.sh calls lit/inpaint_image.py, but deepmi/lit 0.5.0 ships the
+        # code flat in /inpainting. Run its inpainting step directly with the packaged weights.
+        Path(output_directory, "inpainting_volumes").mkdir(parents=True, exist_ok=True)
+        weights = "/inpainting/weights"
+        command = ["python3", "/inpainting/inpaint_image.py",
+                   "--input_image", input_image, "--mask_image", mask_image,
+                   "--out_dir", output_directory,
+                   "--checkpoint_axial", f"{weights}/model_axial.pt",
+                   "--checkpoint_sagittal", f"{weights}/model_sagittal.pt",
+                   "--checkpoint_coronal", f"{weights}/model_coronal.pt",
+                   "--dilate", str(dilate)]
+    run_container("lit", command, binds, gpu=True, workdir="/inpainting")
 
 
 def parse_subject_ids(subjects_arg):

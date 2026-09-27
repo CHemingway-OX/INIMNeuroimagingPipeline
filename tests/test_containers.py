@@ -310,9 +310,12 @@ class ContainerTests(unittest.TestCase):
         with patch.dict(os.environ, self.env, clear=True):
             run_lit_container(str(self.base / 't1.nii.gz'), str(self.base / 'mask.nii.gz'), str(out), 1)
         call = self.calls()[0]
-        self.assertIn('/inpainting/run_lit.sh', call)
+        self.assertIn('/inpainting/inpaint_image.py', call)
+        self.assertNotIn('/inpainting/run_lit.sh', call)
+        self.assertIn('/inpainting/weights/model_axial.pt', call)
         self.assertIn('--nv', call)
         self.assertFalse(any(arg.endswith(':/inpainting:ro') for arg in call))
+        self.assertTrue((out / 'inpainting_volumes').is_dir())
 
     def test_metrics_helper_runs_without_gpu(self):
         stats = self.base / 'aseg.stats'

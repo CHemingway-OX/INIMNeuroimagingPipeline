@@ -164,6 +164,13 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
   new subjects start.
 * Defaults `--gpu-time 04:00:00` and `--cpu-time 06:00:00` suit 4-5 sessions per
   subject (LIT takes about 15 min and LST-AI about 6 min per session).
+* Scan dates for SEL: `hpc/make_sessions_tsv.py` writes every
+  `sub-<ID>/sub-<ID>_sessions.tsv` from an Excel table with an ID column
+  (`study-id`, values like `sub-1`) and `ses_1`, `ses_2`, ... date columns. IDs
+  match the BIDS directories by number (`sub-1` -> `sub-001`). It is a dry run
+  unless `--write` is given, keeps other columns of existing files and refuses
+  implausible or unordered dates. It needs no extra Python packages:
+  `python3 hpc/make_sessions_tsv.py --excel Sessions.xlsx --bids /mnt/e/COHORT/BIDS [--write]`
 * Stopping and restarting is safe: submitted subjects are picked up again, and
   unreachable ssh (VPN) is retried at the next poll.
 

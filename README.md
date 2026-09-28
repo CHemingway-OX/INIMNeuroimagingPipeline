@@ -162,8 +162,13 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
   `--max-on-hpc` (default 6) subjects with data on the HPC. Failed subjects keep
   their HPC data for inspection; after `--max-failed` (default 3) failures no
   new subjects start.
-* Defaults `--gpu-time 04:00:00` and `--cpu-time 06:00:00` suit 4-5 sessions per
-  subject (LIT takes about 15 min and LST-AI about 6 min per session).
+* Defaults `--gpu-time 08:00:00` (the jobs-gpu maximum) and `--cpu-time 06:00:00`.
+  FS-LIT took 12-79 min per session in the pilot, depending on the image grid;
+  LST-AI about 3-4 min per session.
+* `--reset sub-001,sub-005` processes finished or failed subjects again from
+  scratch, e.g. after correcting scan dates: their HPC data is removed and the
+  fetched results are moved to `.cohort_driver/reset_backup/<time>/`. Subjects
+  with active jobs are refused (`scancel` first). Add `--status` to only reset.
 * Scan dates for SEL: `hpc/make_sessions_tsv.py` writes every
   `sub-<ID>/sub-<ID>_sessions.tsv` from an Excel table with an ID column
   (`study-id`, values like `sub-1`) and `ses_1`, `ses_2`, ... date columns. IDs

@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shlex
 import shutil
 import subprocess
@@ -204,6 +205,7 @@ def send(hpc, local_root, rels, remote_root):
     finally:
         proc.stdin.close()
     err = proc.stderr.read().decode(errors='replace')
+    proc.stderr.close()
     if proc.wait():
         raise RemoteError(f'upload failed: {err.strip()[-800:]}', proc.returncode)
 
@@ -234,7 +236,10 @@ def receive(hpc, remote_root, rels, local_root):
                     tar.extract(member, local_root)
     finally:
         feeder.join()
+        proc.stdout.read()  # drain the end-of-archive padding so tar does not hit a closed pipe
+        proc.stdout.close()
         err = proc.stderr.read().decode(errors='replace')
+        proc.stderr.close()
         returncode = proc.wait()
     if returncode:
         raise RemoteError(f'download failed: {err.strip()[-800:]}', returncode)
@@ -243,6 +248,27 @@ def receive(hpc, remote_root, rels, local_root):
 def subject_label(value):
     value = value.strip()
     return value if value.startswith('sub-') else 'sub-' + value
+
+
+def resolve_subjects(values, known):
+    """Map IDs to known subject labels: exact label first, else by number (1, sub-1, 001 -> sub-001)."""
+    by_number = {}
+    for label in known:
+        match = re.fullmatch(r'sub-0*(\d+)', label)
+        if match:
+            by_number.setdefault(int(match.group(1)), []).append(label)
+    resolved, missing = [], []
+    for value in values:
+        label = subject_label(value)
+        match = re.fullmatch(r'sub-0*(\d+)', label)
+        # A bare number is matched by value only; 12 is ambiguous with sub-12 and sub-012.
+        explicit = label in known and (value.strip().startswith('sub-') or not match)
+        candidates = [label] if explicit else by_number.get(int(match.group(1)), []) if match else []
+        if len(candidates) == 1:
+            resolved.append(candidates[0])
+        else:
+            missing.append(value.strip() + (' (ambiguous: ' + ', '.join(candidates) + ')' if candidates else ''))
+    return list(dict.fromkeys(resolved)), missing
 
 
 def upload_files(local_bids, sub):
@@ -460,6 +486,36 @@ class Driver:
             self.save()
         return True
 
+    def reset(self, subjects):
+        """Queue finished or failed subjects again; results are moved to a backup, not deleted."""
+        unknown = [s for s in subjects if s not in self.state['subjects']]
+        active = [s for s in subjects if self.state['subjects'].get(s, {}).get('status') == 'submitted']
+        if unknown:
+            raise SystemExit(f'--reset: not in the selected subjects: {", ".join(unknown)}')
+        if active:
+            raise SystemExit(f'--reset: jobs are still active for {", ".join(active)}; '
+                             'cancel them with scancel first, then run the driver once to record the failure')
+        backup = self.state_dir / 'reset_backup' / datetime.now().strftime('%Y%m%d_%H%M%S')
+        for sub in subjects:
+            entry = self.state['subjects'][sub]
+            rels = [p.format(sub=sub) for p in DERIVATIVES]
+            # Leftovers on the HPC (failed runs) would clash with the new provenance, e.g. changed dates.
+            self.hpc.helper(op='remove', root=self.remote_bids, subject=sub, rels=[sub] + rels)
+            moved = 0
+            for rel in rels:
+                source = self.local_out / rel
+                if os.path.lexists(source):
+                    target = backup / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source), str(target))
+                    moved += 1
+            previous = {k: entry.get(k) for k in ('status', 'reason', 'gpu_job', 'cpu_job', 'report_job') if entry.get(k)}
+            self.state['subjects'][sub] = {'status': 'pending', 'reset': datetime.now().isoformat(timespec='seconds'),
+                                           'previous': previous}
+            self.save()
+            self.log(f'{sub}: reset (was {previous.get("status")}); '
+                     + (f'{moved} result path(s) moved to {backup}' if moved else 'no local results'))
+
     def status(self):
         counts = {}
         for sub, entry in sorted(self.state['subjects'].items()):
@@ -511,12 +567,17 @@ def parse_args(argv=None):
     p.add_argument('--max-gpu', type=int, default=2, help='Subjects waiting for or using a GPU. Default: 2')
     p.add_argument('--max-on-hpc', type=int, default=6, help='Subjects with data on the HPC. Default: 6')
     p.add_argument('--max-failed', type=int, default=3, help='Stop admitting subjects after this many failures.')
-    p.add_argument('--gpu-time', default='04:00:00')
+    # FS-LIT took 12-79 min per session in the pilot; 8 h is the jobs-gpu maximum.
+    p.add_argument('--gpu-time', default='08:00:00')
     p.add_argument('--cpu-time', default='06:00:00')
     p.add_argument('--poll', type=int, default=300, help='Seconds between checks. Default: 300')
     p.add_argument('--once', action='store_true', help='Run one scheduling round and exit.')
     p.add_argument('--status', action='store_true', help='Print the state and exit.')
     p.add_argument('--retry-failed', action='store_true', help='Queue failed subjects again.')
+    p.add_argument('--reset', metavar='IDS',
+                   help='Process these finished or failed subjects again from scratch (e.g. after '
+                        'correcting scan dates): their HPC data is removed and fetched results are moved '
+                        'to .cohort_driver/reset_backup/. With --status only resets.')
     p.add_argument('pipeline_args', nargs=argparse.REMAINDER,
                    help='After --: options for struct_bids.sh. Default: --long --SEL')
     args = p.parse_args(argv)
@@ -539,11 +600,11 @@ def select_subjects(args):
         items = args.subjects.split(',')
     else:
         items = [line.split('#')[0] for line in args.subjects_file.read_text().splitlines()]
-    subjects = [subject_label(i) for i in items if i.strip()]
-    missing = [s for s in subjects if not (args.local_bids / s).is_dir()]
+    known = [p.name for p in args.local_bids.glob('sub-*') if p.is_dir()]
+    subjects, missing = resolve_subjects([i for i in items if i.strip()], known)
     if missing:
         raise SystemExit(f'Not in --local-bids: {", ".join(missing)}')
-    return list(dict.fromkeys(subjects))
+    return subjects
 
 
 def main(argv=None):
@@ -551,7 +612,7 @@ def main(argv=None):
     driver = Driver(args)
     driver.state_dir.mkdir(parents=True, exist_ok=True)
     driver.load(select_subjects(args))
-    if args.status:
+    if args.status and not args.reset:
         driver.status()
         return 0
     lock = driver.state_dir / 'driver.pid'
@@ -563,6 +624,15 @@ def main(argv=None):
             pass
     lock.write_text(str(os.getpid()))
     try:
+        if args.reset:
+            subjects, missing = resolve_subjects([s for s in args.reset.split(',') if s.strip()],
+                                                 list(driver.state['subjects']))
+            if missing:
+                raise SystemExit(f'--reset: not in the selected subjects: {", ".join(missing)}')
+            driver.reset(subjects)
+            if args.status:
+                driver.status()
+                return 0
         if args.retry_failed:
             for _, entry in driver.entries('failed'):
                 entry.update(status='pending', reason=None)

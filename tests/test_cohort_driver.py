@@ -1,4 +1,7 @@
 """Workstation driver: transfer, verification and cleanup rules, with ssh faked locally."""
+import contextlib
+import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -127,6 +130,47 @@ class DriverTests(unittest.TestCase):
         for bad in (['--', '--stage', 'gpu'], ['--local-out', str(self.bids)]):
             with self.assertRaises(SystemExit):
                 driver.parse_args(common + bad)
+        self.assertEqual(driver.parse_args(common).gpu_time, '08:00:00')
+
+    def test_subject_ids_match_directories_by_number(self):
+        known = ['sub-001', 'sub-005', 'sub-12', 'sub-012', 'sub-abc']
+        self.assertEqual(driver.resolve_subjects(['1', 'sub-5', '005', 'sub-001', 'sub-abc'], known),
+                         (['sub-001', 'sub-005', 'sub-abc'], []))
+        self.assertEqual(driver.resolve_subjects(['12', '7'], known)[1], ['12 (ambiguous: sub-12, sub-012)', '7'])
+        self.assertEqual(driver.resolve_subjects(['sub-012'], known), (['sub-012'], []))  # exact wins
+
+    def reset_setup(self, status):
+        out, remote = self.base / 'out', self.base / 'staging'
+        (out / '.cohort_driver').mkdir(parents=True)
+        (out / '.cohort_driver' / 'state.json').write_text(json.dumps({
+            'remote_bids': str(remote),
+            'subjects': {'sub-001': {'status': status, 'gpu_job': '1', 'cpu_job': '2', 'report_job': '3'}}}))
+        self.derivatives(out)
+        self.derivatives(remote)  # e.g. left over from a failed run
+        (remote / 'sub-001').mkdir()
+        args = ['--local-bids', str(self.bids), '--local-out', str(out), '--remote-bids', str(remote),
+                '--subjects', '1', '--ssh', str(self.base / 'ssh'), '--host', 'x', '--reset', '1', '--status']
+        return out, remote, args
+
+    def test_reset_requeues_and_keeps_a_backup(self):
+        out, remote, args = self.reset_setup('done')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(driver.main(args), 0)
+        state = json.loads((out / '.cohort_driver' / 'state.json').read_text())['subjects']['sub-001']
+        self.assertEqual(state['status'], 'pending')
+        self.assertEqual(state['previous']['report_job'], '3')
+        sel = 'derivatives/structural_pipeline/sel_deformation/sub-001'
+        self.assertFalse((out / sel).exists())
+        backups = list((out / '.cohort_driver' / 'reset_backup').glob(f'*/{sel}/pairs/*/jacobian.nii.gz'))
+        self.assertEqual(len(backups), 1)
+        self.assertFalse((remote / 'sub-001').exists())
+        self.assertFalse((remote / sel).exists())
+
+    def test_reset_refuses_active_jobs(self):
+        out, remote, args = self.reset_setup('submitted')
+        with self.assertRaisesRegex(SystemExit, 'scancel'):
+            driver.main(args)
+        self.assertTrue((out / 'derivatives/structural_pipeline/sel_deformation/sub-001').exists())
 
 
 if __name__ == '__main__':

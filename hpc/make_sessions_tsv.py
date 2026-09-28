@@ -227,7 +227,8 @@ def main(argv=None):
             print(line + (': ' + ', '.join(f'{k}={v}' for k, v in sorted(sessions.items())) if args.show_dates else ''))
         if args.write and state != 'unchanged':
             tmp = target.with_suffix('.tsv.tmp')
-            tmp.write_text(content, newline='\n')
+            with tmp.open('w', newline='\n') as stream:  # write_text(newline=) needs Python 3.10
+                stream.write(content)
             tmp.replace(target)
 
     print()

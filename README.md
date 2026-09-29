@@ -165,6 +165,11 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
 * Defaults `--gpu-time 08:00:00` (the jobs-gpu maximum) and `--cpu-time 06:00:00`.
   FS-LIT took 12-79 min per session in the pilot, depending on the image grid;
   LST-AI about 3-4 min per session.
+* FS-LIT runs on 1 mm isotropic inputs: finer T1w images are resampled first,
+  because FS-LIT otherwise conforms to the smallest voxel size isotropically
+  (0.31 mm in-plane T1w images exceeded 40 GB of GPU memory and the 8 h limit).
+  `LIT_VOX_SIZE` in `hpc/config.local.sh` changes it (`native` keeps the input
+  grid); `*_inpainting_input.json` records the sizes per session.
 * `--reset sub-001,sub-005` processes finished or failed subjects again from
   scratch, e.g. after correcting scan dates: their HPC data is removed and the
   fetched results are moved to `.cohort_driver/reset_backup/<time>/`. Subjects

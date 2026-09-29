@@ -397,6 +397,25 @@ class ContainerTests(unittest.TestCase):
         self.assertFalse(any(arg.endswith(':/inpainting:ro') for arg in call))
         self.assertTrue((out / 'inpainting_volumes').is_dir())
 
+    def test_lit_resamples_fine_t1w_to_one_millimetre(self):
+        import ants
+        import numpy as np
+        from run_lesioninpainting import lit_reference, lit_voxel_size
+        fine = self.base / 'fine.nii.gz'
+        coarse = self.base / 'coarse.nii.gz'
+        ants.image_write(ants.from_numpy(np.random.rand(40, 60, 60).astype('float32'), spacing=(0.5, 0.31, 0.31)), str(fine))
+        ants.image_write(ants.from_numpy(np.random.rand(20, 20, 20).astype('float32'), spacing=(1.0, 1.0, 1.0)), str(coarse))
+        out = self.base / 'lit_input.nii.gz'
+        path, image, resampled = lit_reference(str(fine), 1.0, str(out))
+        self.assertTrue(resampled)
+        self.assertEqual(path, str(out))
+        self.assertTrue(np.allclose(ants.image_read(path).spacing, (1, 1, 1)))
+        self.assertEqual(lit_reference(str(coarse), 1.0, str(self.base / 'x.nii.gz'))[::2], (str(coarse), False))
+        self.assertEqual(lit_reference(str(fine), None, str(self.base / 'y.nii.gz'))[::2], (str(fine), False))
+        self.assertEqual((lit_voxel_size('1'), lit_voxel_size('0.7'), lit_voxel_size('native')), (1.0, 0.7, None))
+        with self.assertRaises(ValueError):
+            lit_voxel_size('0')
+
     def test_metrics_helper_runs_without_gpu(self):
         stats = self.base / 'aseg.stats'
         stats.touch()

@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))                                                                                 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))        
 import datetime
+import json
 import subprocess
 from pathlib import Path
 import re
@@ -66,7 +67,33 @@ def filter_subject_dirs(dirs, subject_ids):
     return [x for x in dirs if getSubjectID(x) in subject_ids]
 
 
-def process_LIT(dirs, LST_dir, out_dir, dilate = 1):
+def lit_voxel_size(value):
+    """None for 'native' (the input grid), else a positive voxel size in mm."""
+    if str(value).strip().lower() == 'native':
+        return None
+    size = float(value)
+    if not size > 0:
+        raise ValueError(f'LIT voxel size must be positive or "native": {value}')
+    return size
+
+
+def lit_reference(t1_path, vox_size, resampled_path):
+    """T1w image FS-LIT runs on, as (path, ANTs image, resampled?).
+
+    FS-LIT conforms its input isotropically to the smallest voxel size, so a T1w with
+    0.31 mm in-plane voxels becomes ~30x the voxels of 1 mm; that exceeded 40 GB of GPU
+    memory and the 8 h limit. Finer images are resampled to vox_size (linear, like
+    mri_convert --conform for FastSurfer); images at vox_size or coarser stay as they are.
+    """
+    t1 = ants.image_read(t1_path)
+    if vox_size is None or min(t1.spacing) >= vox_size - 1e-3:
+        return t1_path, t1, False
+    resampled = ants.resample_image(t1, (vox_size,) * 3, use_voxels=False, interp_type=0)
+    ants.image_write(resampled, resampled_path)
+    return resampled_path, resampled, True
+
+
+def process_LIT(dirs, LST_dir, out_dir, dilate = 1, vox_size = 1.0):
     """
     This function implements Fastsurfer LIT
     """
@@ -124,10 +151,13 @@ def process_LIT(dirs, LST_dir, out_dir, dilate = 1):
                 transform_t1_to_mni_ants_path = os.path.join(temp_dir, f'sub-{subID}_ses-{sesID}_t1_to_mni_ants.mat')
                 ants.write_transform(transform_t1_to_mni_obj, transform_t1_to_mni_ants_path)
 
-                # lesion mask image in MPRAGE space
+                # T1w grid FS-LIT runs on (resampled if finer than vox_size)
+                lit_t1, lit_t1_image, resampled = lit_reference(
+                    MPRAGE[i], vox_size, os.path.join(temp_dir, f'sub-{subID}_ses-{sesID}_T1w_lit-input.nii.gz'))
+                # lesion mask image in that T1w space, transformed once from FLAIR space
                 print(MPRAGE[i] , mask_image_space_flair , transform_flair_to_mni_ants_path, transform_t1_to_mni_ants_path)
                 mask_image = ants.apply_transforms(
-                    fixed=ants.image_read(MPRAGE[i]),
+                    fixed=lit_t1_image,
                     moving=moving,
                     transformlist=[transform_flair_to_mni_ants_path, transform_t1_to_mni_ants_path],
                     whichtoinvert=[False , True],
@@ -144,7 +174,7 @@ def process_LIT(dirs, LST_dir, out_dir, dilate = 1):
                     print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: lesion inpainting already done, skip and proceed to next case...')
                     continue
                 
-                run_lit_container(MPRAGE[i], mask_image_path, deriv_ses, dilate)
+                run_lit_container(lit_t1, mask_image_path, deriv_ses, dilate)
 
                 inpainting_dir = os.path.join(deriv_ses, "inpainting_volumes")
                 raw_result = os.path.join(inpainting_dir, "inpainting_result.nii.gz")
@@ -171,6 +201,12 @@ def process_LIT(dirs, LST_dir, out_dir, dilate = 1):
                     raw_original,
                     os.path.join(inpainting_dir, f'sub-{subID}_ses-{sesID}_inpainting_original_image.nii.gz'),
                 )
+
+                with open(os.path.join(inpainting_dir, f'sub-{subID}_ses-{sesID}_inpainting_input.json'), 'w') as stream:
+                    json.dump({'source_t1w': MPRAGE[i],
+                               'source_voxel_size_mm': [round(float(v), 4) for v in ants.image_header_info(MPRAGE[i])['spacing']],
+                               'lit_input_voxel_size_mm': [round(float(v), 4) for v in lit_t1_image.spacing],
+                               'resampled_for_lit': resampled}, stream, indent=2)
 
                 if os.path.exists(seg_file):
                     print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: Rename FS-LIT lesion inpainted image (BIDS) DONE!')
@@ -200,6 +236,12 @@ if __name__ == "__main__":
                         help='derivatives folder name in BIDS directory with LST-AI results', 
                         required=True)
     
+    parser.add_argument('--vox_size',
+                        help='Voxel size (mm) FS-LIT runs at: finer T1w images are resampled to it; '
+                             '"native" keeps the input grid. Default: LIT_VOX_SIZE or 1.',
+                        type=lit_voxel_size,
+                        default=lit_voxel_size(os.environ.get('LIT_VOX_SIZE', '1')))
+
     parser.add_argument('--dilate', 
                         help='Dilate value for lesion mask.', 
                         type=int, 
@@ -240,10 +282,7 @@ if __name__ == "__main__":
     files = split_list(alist = dirs_missing, 
                        splits = n_workers)
 
-    process_LIT(files[0],
-                                               args.derivatives,
-                                               out_dir,                                        
-                                               args.dilate)
+    process_LIT(files[0], args.derivatives, out_dir, args.dilate, args.vox_size)
 
     # # initialize multithreading
     # pool = multiprocessing.Pool(processes=n_workers)

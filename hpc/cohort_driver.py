@@ -360,6 +360,10 @@ class Driver:
                 raise SystemExit(f'State in {self.state_file} belongs to --remote-bids '
                                  f'{self.state.get("remote_bids")}; use that or a new --local-out')
         self.state['remote_bids'] = self.remote_bids
+        for entry in self.state['subjects'].values():
+            if (entry.get('status') == 'failed' and entry.get('remote_data') is False
+                    and any(m in (entry.get('reason') or '') for m in ('no T1w images', 'sessions.tsv missing'))):
+                entry['status'] = 'skipped'
         for sub in subjects:
             self.state['subjects'].setdefault(sub, {'status': 'pending'})
 
@@ -369,14 +373,13 @@ class Driver:
     # --- one subject ---
 
     def start(self, sub, entry):
+        # Data problems on the workstation are 'skipped': they do not count towards --max-failed.
         if '--SEL' in self.pipeline_args and not (self.local_bids / sub / f'{sub}_sessions.tsv').is_file():
-            entry.update(status='failed', remote_data=False, reason=f'{sub}_sessions.tsv missing (scan dates for SEL)')
-            self.log(f'{sub}: FAILED before upload: {entry["reason"]}')
+            self.skip(sub, entry, f'{sub}_sessions.tsv missing (scan dates for SEL)')
             return
         rels = upload_files(self.local_bids, sub)
         if not any('_T1w.' in r for r in rels):
-            entry.update(status='failed', remote_data=False, reason='no T1w images')
-            self.log(f'{sub}: FAILED before upload: no T1w images')
+            self.skip(sub, entry, 'no T1w images (ses-*/anat/*_T1w.nii[.gz])')
             return
         self.log(f'{sub}: uploading {len(rels)} files')
         entry['remote_data'] = True
@@ -403,6 +406,10 @@ class Driver:
         except RemoteError as error:  # retried at the next poll; GPU and CPU jobs are queued
             self.log(f'{sub}: report job not submitted yet: {error}')
         self.log(f'{sub}: submitted GPU {entry["gpu_job"]}, CPU {entry["cpu_job"]}, report {entry["report_job"]}')
+
+    def skip(self, sub, entry, reason):
+        entry.update(status='skipped', remote_data=False, reason=reason)
+        self.log(f'{sub}: SKIPPED before upload: {reason}; fix the data, then restart with --retry-failed')
 
     def submit_report(self, sub, entry, after_cpu):
         """Per-subject metrics and QC into their own directories (no shared CSV/index)."""
@@ -520,7 +527,7 @@ class Driver:
         counts = {}
         for sub, entry in sorted(self.state['subjects'].items()):
             counts[entry['status']] = counts.get(entry['status'], 0) + 1
-            if entry['status'] in ('submitted', 'failed'):
+            if entry['status'] in ('submitted', 'failed', 'skipped'):
                 jobs = ' '.join(f'{k[:-4]}={entry[k]}' for k in ('gpu_job', 'cpu_job', 'report_job') if entry.get(k))
                 print(f'{sub:>14} {entry["status"]:<9} {jobs} {entry.get("reason", "")}')
         print(' '.join(f'{k}={v}' for k, v in sorted(counts.items())))
@@ -543,11 +550,12 @@ class Driver:
         if merged:
             self.log(f'Cohort metrics: {merged}')
         failed = self.entries('failed')
+        skipped = self.entries('skipped')
         if not admitting:
             self.log(f'Stopped admitting subjects after {len(failed)} failures (--max-failed)')
         self.log(f'Finished: {len(self.entries("done"))} done, {len(failed)} failed, '
-                 f'{len(self.entries("pending"))} pending')
-        return 1 if failed else 0
+                 f'{len(skipped)} skipped, {len(self.entries("pending"))} pending')
+        return 1 if failed or skipped else 0
 
 
 def parse_args(argv=None):
@@ -573,7 +581,7 @@ def parse_args(argv=None):
     p.add_argument('--poll', type=int, default=300, help='Seconds between checks. Default: 300')
     p.add_argument('--once', action='store_true', help='Run one scheduling round and exit.')
     p.add_argument('--status', action='store_true', help='Print the state and exit.')
-    p.add_argument('--retry-failed', action='store_true', help='Queue failed subjects again.')
+    p.add_argument('--retry-failed', action='store_true', help='Queue failed and skipped subjects again.')
     p.add_argument('--reset', metavar='IDS',
                    help='Process these finished or failed subjects again from scratch (e.g. after '
                         'correcting scan dates): their HPC data is removed and fetched results are moved '
@@ -634,7 +642,7 @@ def main(argv=None):
                 driver.status()
                 return 0
         if args.retry_failed:
-            for _, entry in driver.entries('failed'):
+            for _, entry in driver.entries('failed', 'skipped'):
                 entry.update(status='pending', reason=None)
         driver.save()
         driver.hpc.helper(op='prepare_staging', root=driver.remote_bids)

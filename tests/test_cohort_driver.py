@@ -132,6 +132,25 @@ class DriverTests(unittest.TestCase):
                 driver.parse_args(common + bad)
         self.assertEqual(driver.parse_args(common).gpu_time, '08:00:00')
 
+    def test_data_problems_are_skipped_not_failed(self):
+        out = self.base / 'out'
+        (out / '.cohort_driver').mkdir(parents=True)
+        # State written by the earlier version: data problems recorded as failures.
+        (out / '.cohort_driver' / 'state.json').write_text(json.dumps({'remote_bids': '/staging/x', 'subjects': {
+            'sub-001': {'status': 'failed', 'remote_data': False, 'reason': 'no T1w images'},
+            'sub-002': {'status': 'failed', 'remote_data': True, 'reason': 'GPU job FAILED'}}}))
+        (self.bids / 'sub-002' / 'ses-1' / 'anat').mkdir(parents=True)
+        args = driver.parse_args(['--local-bids', str(self.bids), '--local-out', str(out), '--remote-bids', '/staging/x',
+                                  '--all', '--ssh', str(self.base / 'ssh'), '--host', 'x'])
+        d = driver.Driver(args)
+        d.load(driver.select_subjects(args))
+        self.assertEqual(d.state['subjects']['sub-001']['status'], 'skipped')
+        self.assertEqual(d.state['subjects']['sub-002']['status'], 'failed')
+        entry = {'status': 'pending'}
+        d.start('sub-002', entry)  # has no T1w image
+        self.assertEqual(entry['status'], 'skipped')
+        self.assertEqual(len(d.entries('failed')), 1)  # only real HPC failures count for --max-failed
+
     def test_subject_ids_match_directories_by_number(self):
         known = ['sub-001', 'sub-005', 'sub-12', 'sub-012', 'sub-abc']
         self.assertEqual(driver.resolve_subjects(['1', 'sub-5', '005', 'sub-001', 'sub-abc'], known),

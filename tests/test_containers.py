@@ -367,6 +367,24 @@ class ContainerTests(unittest.TestCase):
         self.assertNotIn('FastSurfer segmentation required', result.stderr)
         self.assertGreaterEqual(len(self.calls()), 1)  # LST-AI container started
 
+    def test_lst_and_lit_skip_sessions_without_flair(self):
+        (self.bids / 'sub-001' / 'ses-1' / 'anat' / 'sub-001_ses-1_FLAIR.nii.gz').unlink()
+        result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
+                               '--subjects', '001', '--skip_annotation'])
+        self.assertIn('sub-001_ses-1: WARNING no FLAIR image, skipping LST-AI', result.stdout)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)  # only ses-2 reaches LST-AI
+        self.assertTrue(any('sub-001_ses-2_T1w' in arg for arg in calls[0]))
+        (self.bids / 'sub-001' / 'ses-2' / 'anat' / 'sub-001_ses-2_FLAIR.nii.gz').unlink()
+        import contextlib
+        import io
+        from run_lesioninpainting import process_LIT
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(out):
+            process_LIT([str(self.bids / 'sub-001')], str(self.base / 'no-lst'), str(self.base / 'lit'))
+        self.assertEqual(out.getvalue().count('WARNING no FLAIR image, skipping FS-LIT'), 2)
+        self.assertEqual(len(self.calls()), 1)  # no LIT container started
+
     def test_lst_annotation_only_requires_lst_outputs(self):
         result = self.run_cli([sys.executable, 'run_scripts/run_lst_docker.py', '-i', str(self.bids),
                                '--subjects', '001', '--annotation_only'], HDBET_HOME='/nonexistent')

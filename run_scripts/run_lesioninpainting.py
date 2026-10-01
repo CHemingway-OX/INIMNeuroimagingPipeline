@@ -115,6 +115,11 @@ def process_LIT(dirs, LST_dir, out_dir, dilate = 1, vox_size = 1.0):
             # try:
                 # get session ID of current MPRAGE image
                 sesID = getSessionID(path = MPRAGE[i])
+                if not os.path.exists(MPRAGE[i].replace('_T1w.nii.gz', '_FLAIR.nii.gz')):
+                    # No FLAIR, so LST-AI produced no lesion mask for this session.
+                    print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: WARNING no FLAIR image, '
+                          'skipping FS-LIT for this session', flush=True)
+                    continue
                 print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: Processing lesion inpainting with FS-LIT...')
                 # print(str(MPRAGE[i]))
                 # check availability of files and folders (create folders if necessary)

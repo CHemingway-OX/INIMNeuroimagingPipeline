@@ -161,7 +161,10 @@ def process_lst_ai(dirs, n_container, derivatives_dir, bids_dir, clipping, lesio
                     raise ValueError(f'Unknown system {system}, please specify system as either "GH" or "BMC".')
 
                 if not os.path.exists(flair):
-                    raise ValueError(f'sub-{subID}_ses-{sesID}: FLAIR image not available!!')
+                    # Incomplete session: FastSurfer still uses its T1w; lesion steps skip it.
+                    print(f'{datetime.datetime.now()} sub-{subID}_ses-{sesID}: WARNING no FLAIR image, '
+                          'skipping LST-AI for this session', flush=True)
+                    continue
 
                 temp_dir = os.path.join(derivatives_dir, f'sub-{subID}', f'ses-{sesID}', 'temp')
                 if not os.path.exists(temp_dir):

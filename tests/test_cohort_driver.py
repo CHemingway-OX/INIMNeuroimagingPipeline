@@ -1,5 +1,6 @@
 """Workstation driver: transfer, verification and cleanup rules, with ssh faked locally."""
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -35,7 +36,9 @@ class DriverTests(unittest.TestCase):
             anat = self.bids / 'sub-001' / ses / 'anat'
             anat.mkdir(parents=True)
             for name in ('T1w.nii.gz', 'T1w.json', 'FLAIR.nii.gz', 'FLAIR.json', 'T2w.nii.gz'):
-                (anat / f'sub-001_{ses}_{name}').write_text(name + ses)
+                content = (name + ses).encode()
+                # Valid gzip streams: the driver refuses truncated images before uploading.
+                (anat / f'sub-001_{ses}_{name}').write_bytes(gzip.compress(content) if name.endswith('.gz') else content)
             (self.bids / 'sub-001' / ses / 'dwi').mkdir()
             (self.bids / 'sub-001' / ses / 'dwi' / 'big_dwi.nii.gz').write_text('dwi')
         (self.bids / 'sub-001' / 'sub-001_sessions.tsv').write_text('session_id\tacq_time\n')
@@ -150,6 +153,43 @@ class DriverTests(unittest.TestCase):
         d.start('sub-002', entry)  # has no T1w image
         self.assertEqual(entry['status'], 'skipped')
         self.assertEqual(len(d.entries('failed')), 1)  # only real HPC failures count for --max-failed
+
+    def test_excluded_sessions_are_not_uploaded(self):
+        rels = driver.upload_files(self.bids, 'sub-001', ['ses-2'])
+        self.assertFalse(any('/ses-2/' in r for r in rels))
+        self.assertIn('sub-001/sub-001_sessions.tsv', rels)
+        self.assertEqual(driver.parse_session_list('1_ses-2, sub-001_ses-3', ['sub-001', 'sub-012']),
+                         {'sub-001': {'ses-2', 'ses-3'}})
+        for bad in ('sub-001', '99_ses-1'):
+            with self.assertRaises(SystemExit):
+                driver.parse_session_list(bad, ['sub-001'])
+
+    def test_exclusions_persist_and_can_be_undone(self):
+        out = self.base / 'out'
+        common = ['--local-bids', str(self.bids), '--local-out', str(out), '--remote-bids', '/staging/x',
+                  '--all', '--ssh', str(self.base / 'ssh'), '--host', 'x', '--status']
+        with contextlib.redirect_stdout(io.StringIO()):
+            driver.main(common + ['--exclude-sessions', 'sub-001_ses-2'])
+        state = json.loads((out / '.cohort_driver' / 'state.json').read_text())
+        self.assertEqual(state['excluded_sessions'], {'sub-001': ['ses-2']})
+        with contextlib.redirect_stdout(io.StringIO()):
+            driver.main(common + ['--include-sessions', '1_ses-2'])
+        self.assertEqual(json.loads((out / '.cohort_driver' / 'state.json').read_text())['excluded_sessions'], {})
+
+    def test_truncated_image_is_skipped_before_upload(self):
+        image = self.bids / 'sub-001/ses-1/anat/sub-001_ses-1_FLAIR.nii.gz'
+        payload = gzip.compress(os.urandom(200000))
+        image.write_bytes(payload[:len(payload) // 2])  # a copy that stopped half-way
+        args = driver.parse_args(['--local-bids', str(self.bids), '--local-out', str(self.base / 'out'),
+                                  '--remote-bids', '/staging/x', '--all', '--ssh', str(self.base / 'ssh'), '--host', 'x'])
+        d = driver.Driver(args)
+        d.state_dir.mkdir(parents=True)
+        d.load(driver.select_subjects(args))
+        entry = {'status': 'pending'}
+        d.start('sub-001', entry)
+        self.assertEqual(entry['status'], 'skipped')
+        self.assertIn('corrupt file sub-001/ses-1/anat/sub-001_ses-1_FLAIR.nii.gz', entry['reason'])
+        self.assertIsNone(driver.broken_gzip(self.bids / 'sub-001/ses-2/anat/sub-001_ses-2_T1w.nii.gz'))
 
     def test_subject_ids_match_directories_by_number(self):
         known = ['sub-001', 'sub-005', 'sub-12', 'sub-012', 'sub-abc']

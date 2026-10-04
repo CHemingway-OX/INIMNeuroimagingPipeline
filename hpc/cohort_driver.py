@@ -18,6 +18,7 @@ import argparse
 import csv
 from datetime import datetime
 import fnmatch
+import gzip
 import hashlib
 import json
 import os
@@ -30,6 +31,7 @@ import sys
 import tarfile
 import threading
 import time
+import zlib
 
 # Relative to the staging BIDS root; {sub} is sub-<ID>.
 DERIVATIVES = [
@@ -271,17 +273,51 @@ def resolve_subjects(values, known):
     return list(dict.fromkeys(resolved)), missing
 
 
-def upload_files(local_bids, sub):
-    """T1w/FLAIR images with sidecars and the sessions file, relative to the BIDS root."""
+def upload_files(local_bids, sub, excluded=()):
+    """T1w/FLAIR images with sidecars and the sessions file, relative to the BIDS root.
+
+    Sessions in excluded (e.g. ['ses-2']) are left out entirely.
+    """
     local_bids = Path(local_bids)
     rels = []
     sessions = local_bids / sub / f'{sub}_sessions.tsv'
     if sessions.is_file():
         rels.append(sessions.relative_to(local_bids).as_posix())
     for anat in sorted((local_bids / sub).glob('ses-*/anat')):
+        if anat.parent.name in excluded:
+            continue
         for pattern in UPLOAD_PATTERNS:
             rels += [p.relative_to(local_bids).as_posix() for p in sorted(anat.glob(pattern))]
     return rels
+
+
+def broken_gzip(path):
+    """Error text if a .gz file does not decompress completely (e.g. a truncated copy), else None."""
+    try:
+        with gzip.open(path, 'rb') as stream:
+            while stream.read(1 << 22):
+                pass
+    except (OSError, EOFError, zlib.error) as error:
+        return str(error)
+    return None
+
+
+def parse_session_list(value, known_subjects):
+    """{'sub-072': ['ses-2']} from 'sub-072_ses-2,72_ses-3'; subjects are matched by number."""
+    excluded, problems = {}, []
+    for item in [i.strip() for i in value.split(',') if i.strip()]:
+        match = re.fullmatch(r'(.+?)[_/](ses-[A-Za-z0-9]+)', item)
+        if not match:
+            problems.append(f'{item} (expected SUBJECT_ses-N, e.g. sub-072_ses-2)')
+            continue
+        subjects, missing = resolve_subjects([match.group(1)], known_subjects)
+        if missing:
+            problems.append(f'{item} (unknown subject)')
+            continue
+        excluded.setdefault(subjects[0], set()).add(match.group(2))
+    if problems:
+        raise SystemExit('--exclude-sessions/--include-sessions: ' + ', '.join(problems))
+    return excluded
 
 
 def job_states(hpc, job_ids):
@@ -377,10 +413,16 @@ class Driver:
         if '--SEL' in self.pipeline_args and not (self.local_bids / sub / f'{sub}_sessions.tsv').is_file():
             self.skip(sub, entry, f'{sub}_sessions.tsv missing (scan dates for SEL)')
             return
-        rels = upload_files(self.local_bids, sub)
+        rels = upload_files(self.local_bids, sub, self.state.get('excluded_sessions', {}).get(sub, ()))
         if not any('_T1w.' in r for r in rels):
             self.skip(sub, entry, 'no T1w images (ses-*/anat/*_T1w.nii[.gz])')
             return
+        # A truncated image is read partially by some tools without an error; never process it.
+        for rel in rels:
+            error = broken_gzip(self.local_bids / rel) if rel.endswith('.gz') else None
+            if error:
+                self.skip(sub, entry, f'corrupt file {rel}: {error}')
+                return
         self.log(f'{sub}: uploading {len(rels)} files')
         entry['remote_data'] = True
         send(self.hpc, self.local_bids, rels, self.remote_bids)
@@ -523,6 +565,21 @@ class Driver:
             self.log(f'{sub}: reset (was {previous.get("status")}); '
                      + (f'{moved} result path(s) moved to {backup}' if moved else 'no local results'))
 
+    def set_excluded_sessions(self, exclude, include):
+        """Persist session exclusions; they apply to the next upload of each subject."""
+        known = list(self.state['subjects'])
+        current = {s: set(v) for s, v in self.state.get('excluded_sessions', {}).items()}
+        for sub, sessions in parse_session_list(exclude or '', known).items():
+            current.setdefault(sub, set()).update(sessions)
+        for sub, sessions in parse_session_list(include or '', known).items():
+            current[sub] = current.get(sub, set()) - sessions
+        self.state['excluded_sessions'] = {s: sorted(v) for s, v in sorted(current.items()) if v}
+        self.save()
+        for sub, sessions in self.state['excluded_sessions'].items():
+            status = self.state['subjects'][sub]['status']
+            note = '' if status in ('pending', 'skipped') else f' (status {status}: add --reset {sub} to process it again without them)'
+            self.log(f'{sub}: excluded sessions {", ".join(sessions)}{note}')
+
     def status(self):
         counts = {}
         for sub, entry in sorted(self.state['subjects'].items()):
@@ -530,6 +587,8 @@ class Driver:
             if entry['status'] in ('submitted', 'failed', 'skipped'):
                 jobs = ' '.join(f'{k[:-4]}={entry[k]}' for k in ('gpu_job', 'cpu_job', 'report_job') if entry.get(k))
                 print(f'{sub:>14} {entry["status"]:<9} {jobs} {entry.get("reason", "")}')
+        for sub, sessions in self.state.get('excluded_sessions', {}).items():
+            print(f'{sub:>14} excluded sessions: {", ".join(sessions)}')
         print(' '.join(f'{k}={v}' for k, v in sorted(counts.items())))
 
     def run(self):
@@ -586,6 +645,10 @@ def parse_args(argv=None):
                    help='Process these finished or failed subjects again from scratch (e.g. after '
                         'correcting scan dates): their HPC data is removed and fetched results are moved '
                         'to .cohort_driver/reset_backup/. With --status only resets.')
+    p.add_argument('--exclude-sessions', metavar='LIST',
+                   help='Leave sessions out of future uploads, e.g. sub-072_ses-2 (unusable images). '
+                        'Kept in the state; combine with --reset for subjects already processed.')
+    p.add_argument('--include-sessions', metavar='LIST', help='Undo --exclude-sessions for these sessions.')
     p.add_argument('pipeline_args', nargs=argparse.REMAINDER,
                    help='After --: options for struct_bids.sh. Default: --long --SEL')
     args = p.parse_args(argv)
@@ -620,7 +683,8 @@ def main(argv=None):
     driver = Driver(args)
     driver.state_dir.mkdir(parents=True, exist_ok=True)
     driver.load(select_subjects(args))
-    if args.status and not args.reset:
+    changes_state = args.reset or args.exclude_sessions or args.include_sessions
+    if args.status and not changes_state:
         driver.status()
         return 0
     lock = driver.state_dir / 'driver.pid'
@@ -632,15 +696,17 @@ def main(argv=None):
             pass
     lock.write_text(str(os.getpid()))
     try:
+        if args.exclude_sessions or args.include_sessions:
+            driver.set_excluded_sessions(args.exclude_sessions, args.include_sessions)
         if args.reset:
             subjects, missing = resolve_subjects([s for s in args.reset.split(',') if s.strip()],
                                                  list(driver.state['subjects']))
             if missing:
                 raise SystemExit(f'--reset: not in the selected subjects: {", ".join(missing)}')
             driver.reset(subjects)
-            if args.status:
-                driver.status()
-                return 0
+        if args.status and changes_state:
+            driver.status()
+            return 0
         if args.retry_failed:
             for _, entry in driver.entries('failed', 'skipped'):
                 entry.update(status='pending', reason=None)

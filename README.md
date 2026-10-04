@@ -181,6 +181,11 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
   unless `--write` is given, keeps other columns of existing files and refuses
   implausible or unordered dates. It needs no extra Python packages:
   `python3 hpc/make_sessions_tsv.py --excel Sessions.xlsx --bids /mnt/e/COHORT/BIDS [--write]`
+* `--exclude-sessions sub-072_ses-2` leaves unusable sessions out of future
+  uploads (stored in the state, shown by `--status`, undone with
+  `--include-sessions`); add `--reset` for subjects already processed.
+* Before uploading, every `.nii.gz` is decompressed completely; subjects with a
+  truncated image are `skipped` with the file named in `--status`.
 * Stopping and restarting is safe: submitted subjects are picked up again, and
   unreachable ssh (VPN) is retried at the next poll.
 

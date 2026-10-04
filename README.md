@@ -184,6 +184,11 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
 * `--exclude-sessions sub-072_ses-2` leaves unusable sessions out of future
   uploads (stored in the state, shown by `--status`, undone with
   `--include-sessions`); add `--reset` for subjects already processed.
+* Head-first scans registered as feet first (`PatientPosition` `FFS` in the
+  sidecar; images upside down): `hpc/fix_patient_position.py --bids ... --session
+  sub-072_ses-2 [--write]` rotates the NIfTI header back, keeps a backup outside
+  the BIDS tree and notes the correction in the sidecar. Check left/right against
+  another session before processing, then use `--reset` for that subject.
 * Before uploading, every `.nii.gz` is decompressed completely; subjects with a
   truncated image are `skipped` with the file named in `--status`.
 * Stopping and restarting is safe: submitted subjects are picked up again, and

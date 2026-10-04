@@ -54,6 +54,9 @@ def parser(description):
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--alignment', choices=['register', 'already-aligned'], default='register',
                    help='already-aligned is for verified aligned data / synthetic tests only')
+    p.add_argument('--max-lesion-outside-brain-mm3', type=float, default=10.,
+                   help='Lesion volume per visit allowed outside the brain mask; it is removed and recorded '
+                        'as lesion_outside_brain_mm3. More fails validation. Default: 10')
     return p
 
 
@@ -141,8 +144,15 @@ def load_manifest(args):
                 raise ValueError(f'{r["session"]}: {key} must be on the FLAIR grid')
         brain = np.asanyarray(nib.load(r['brain_mask']).dataobj) > 0
         lesion = mask_data(r['lesion'], args)
-        if not brain.any() or np.any(lesion & ~brain):
-            raise ValueError(f'{r["session"]}: empty brain mask or lesions outside brain mask')
+        if not brain.any():
+            raise ValueError(f'{r["session"]}: empty brain mask')
+        # Independent lesion and brain segmentations disagree by a few voxels at the brain edge.
+        outside = float((lesion & ~brain).sum() * abs(np.linalg.det(flair.affine[:3, :3])))
+        limit = getattr(args, 'max_lesion_outside_brain_mm3', 0.)
+        if outside > limit:
+            raise ValueError(f'{r["session"]}: {outside:.1f} mm3 of lesions outside the brain mask '
+                             f'(more than {limit:g} mm3); check the lesion and brain masks')
+        r['lesion_outside_brain_mm3'] = round(outside, 3)
     if len({r['subject'] for r in rows}) != 1:
         raise ValueError('Use one subject per invocation')
     rows.sort(key=lambda r: r['time'])
@@ -157,6 +167,11 @@ def load_manifest(args):
 def mask_data(path, args):
     data = np.asanyarray(nib.load(path).dataobj)
     return data > (args.threshold if args.mask_kind == 'probability' else 0)
+
+
+def lesion_in_brain(row, args):
+    """Lesion mask restricted to the brain mask (both on the FLAIR grid); see load_manifest."""
+    return mask_data(row['lesion'], args) & (np.asanyarray(nib.load(row['brain_mask']).dataobj) > 0)
 
 
 def volume(path, mask):
@@ -303,12 +318,12 @@ def prepare(row, args, root):
         b = warp(brain, 'nearestNeighbor')
         t1 = ants.n4_bias_field_correction(t1, mask=b)
         images = {'t1': t1, 'flair': warp(flair, 'linear'), 'brain': b,
-                  'lesion': warp(ants_like(ants, mask_data(row['lesion'], args), flair), 'nearestNeighbor')}
+                  'lesion': warp(ants_like(ants, lesion_in_brain(row, args), flair), 'nearestNeighbor')}
         for k in ['enhancement_mask', 'chronic_mask']:
             if row[k]:
                 images[k] = warp(ants.image_read(row[k]), 'nearestNeighbor')
         outputs = {}
-        native_labels, _ = ndimage.label(mask_data(row['lesion'], args), ndimage.generate_binary_structure(3, 3))
+        native_labels, _ = ndimage.label(lesion_in_brain(row, args), ndimage.generate_binary_structure(3, 3))
         images['labels'] = warp(ants_like(ants, native_labels, flair), 'nearestNeighbor')
         for k, img in images.items():
             p = str(d / (k + '.nii.gz'))

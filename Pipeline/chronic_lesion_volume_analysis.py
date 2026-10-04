@@ -55,7 +55,7 @@ def change_metrics(v0, v1, years, threshold):
 
 
 def native_info(row, args):
-    labels, n = ndimage.label(common.mask_data(row['lesion'], args), ndimage.generate_binary_structure(3, 3))
+    labels, n = ndimage.label(common.lesion_in_brain(row, args), ndimage.generate_binary_structure(3, 3))
     voxel = abs(np.linalg.det(nib.load(row['lesion']).affine[:3, :3]))
     return labels, np.bincount(labels.ravel(), minlength=n + 1) * voxel
 

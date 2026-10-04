@@ -201,6 +201,22 @@ class EndToEndTests(unittest.TestCase):
         nib.save(nib.Nifti1Image(img.get_fdata(), affine), path)
         with self.assertRaisesRegex(ValueError, 'FLAIR grid'): common.load_manifest(args)
 
+    def test_lesion_voxels_outside_brain_within_tolerance(self):
+        path = self.root / '0_lesion.nii.gz'
+        img = nib.load(path)
+        data = img.get_fdata()
+        data[0, 0, 0] = 1  # one voxel (1 mm3) outside the spherical brain mask
+        nib.save(nib.Nifti1Image(data.astype(np.float32), img.affine), path)
+        args = argparse.Namespace(manifest=self.manifest, threads=1, threshold=.5, mask_kind='binary',
+                                  max_lesion_outside_brain_mm3=10.)
+        rows = common.load_manifest(args)
+        self.assertEqual(rows[0]['lesion_outside_brain_mm3'], 1.0)
+        self.assertEqual(rows[1]['lesion_outside_brain_mm3'], 0.0)
+        self.assertFalse(common.lesion_in_brain(rows[0], args)[0, 0, 0])
+        args.max_lesion_outside_brain_mm3 = 0.5
+        with self.assertRaisesRegex(ValueError, '1.0 mm3 of lesions outside the brain mask'):
+            common.load_manifest(args)
+
     def test_normal_registration_path(self):
         output = self.root / 'registered_sel'
         self.run_cli('sel_deformation_analysis', output, ['--alignment', 'register', '--iterations', '2', '1', '0'])

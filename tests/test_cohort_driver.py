@@ -225,11 +225,43 @@ class DriverTests(unittest.TestCase):
         self.assertFalse((remote / 'sub-001').exists())
         self.assertFalse((remote / sel).exists())
 
+    def fake_sacct(self, states):
+        bindir = self.base / 'bin'
+        lines = ''.join(f'{job}|{state}\\n' for job, state in states.items())
+        (bindir / 'sacct').write_text(f'#!/bin/bash\nprintf "{lines}"\n')
+        (bindir / 'sacct').chmod(0o755)
+
     def test_reset_refuses_active_jobs(self):
         out, remote, args = self.reset_setup('submitted')
+        self.fake_sacct({'1_1': 'COMPLETED', '2_1': 'RUNNING', '3': 'PENDING'})
         with self.assertRaisesRegex(SystemExit, 'scancel'):
             driver.main(args)
         self.assertTrue((out / 'derivatives/structural_pipeline/sel_deformation/sub-001').exists())
+
+    def test_reset_accepts_submitted_subject_whose_jobs_ended(self):
+        out, remote, args = self.reset_setup('submitted')  # the driver was not running when they ended
+        self.fake_sacct({'1_1': 'COMPLETED', '2_1': 'COMPLETED', '3': 'COMPLETED'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(driver.main(args), 0)
+        state = json.loads((out / '.cohort_driver' / 'state.json').read_text())['subjects']['sub-001']
+        self.assertEqual(state['status'], 'pending')
+
+    def test_hold_and_release(self):
+        out = self.base / 'out'
+        common = ['--local-bids', str(self.bids), '--local-out', str(out), '--remote-bids', '/staging/x',
+                  '--all', '--ssh', str(self.base / 'ssh'), '--host', 'x', '--status']
+        with contextlib.redirect_stdout(io.StringIO()):
+            driver.main(common + ['--hold', '1'])
+        state = lambda: json.loads((out / '.cohort_driver' / 'state.json').read_text())['subjects']['sub-001']
+        self.assertEqual(state()['status'], 'held')
+        with contextlib.redirect_stdout(io.StringIO()):
+            driver.main(common + ['--release', 'sub-001'])
+        self.assertEqual(state()['status'], 'pending')
+
+    def test_driver_options_after_double_dash_are_refused(self):
+        with self.assertRaises(SystemExit):
+            driver.parse_args(['--local-bids', str(self.bids), '--local-out', str(self.base / 'out'),
+                               '--remote-bids', '/staging/x', '--all', '--', '--long', '--status'])
 
 
 if __name__ == '__main__':

@@ -191,6 +191,9 @@ python3 hpc/cohort_driver.py ... --retry-failed    # queue failed subjects again
   another session before processing, then use `--reset` for that subject.
 * Before uploading, every `.nii.gz` is decompressed completely; subjects with a
   truncated image are `skipped` with the file named in `--status`.
+* `--hold sub-072` leaves a subject out for now (status `held`, ignored by
+  `--retry-failed`) until `--release sub-072`. Driver options belong before
+  `--`; everything after it goes to `struct_bids.sh`.
 * Stopping and restarting is safe: submitted subjects are picked up again, and
   unreachable ssh (VPN) is retried at the next poll.
 

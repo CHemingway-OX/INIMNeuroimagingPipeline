@@ -538,12 +538,18 @@ class Driver:
     def reset(self, subjects):
         """Queue finished or failed subjects again; results are moved to a backup, not deleted."""
         unknown = [s for s in subjects if s not in self.state['subjects']]
-        active = [s for s in subjects if self.state['subjects'].get(s, {}).get('status') == 'submitted']
         if unknown:
             raise SystemExit(f'--reset: not in the selected subjects: {", ".join(unknown)}')
+        submitted = [s for s in subjects if self.state['subjects'][s]['status'] == 'submitted']
+        # 'submitted' only means the driver has not seen the jobs end (e.g. it was not running).
+        ids = {self.state['subjects'][s].get(k) for s in submitted for k in ('gpu_job', 'cpu_job', 'report_job')} - {None}
+        states = job_states(self.hpc, ids) if ids else {}
+        active = [s for s in submitted if any(states.get(self.state['subjects'][s].get(k)) not in FINISHED
+                                              for k in ('gpu_job', 'cpu_job', 'report_job')
+                                              if self.state['subjects'][s].get(k))]
         if active:
-            raise SystemExit(f'--reset: jobs are still active for {", ".join(active)}; '
-                             'cancel them with scancel first, then run the driver once to record the failure')
+            raise SystemExit(f'--reset: jobs are still queued or running for {", ".join(active)}; '
+                             'cancel them with scancel first')
         backup = self.state_dir / 'reset_backup' / datetime.now().strftime('%Y%m%d_%H%M%S')
         for sub in subjects:
             entry = self.state['subjects'][sub]
@@ -580,11 +586,25 @@ class Driver:
             note = '' if status in ('pending', 'skipped') else f' (status {status}: add --reset {sub} to process it again without them)'
             self.log(f'{sub}: excluded sessions {", ".join(sessions)}{note}')
 
+    def hold(self, subjects, release=False):
+        """'held' subjects are not processed until released; HPC data is left as it is."""
+        for sub in subjects:
+            entry = self.state['subjects'][sub]
+            if release and entry['status'] == 'held':
+                entry.update(status=entry.pop('held_status', 'pending'))
+                self.log(f'{sub}: released ({entry["status"]})')
+            elif not release and entry['status'] != 'held':
+                if entry['status'] == 'submitted':
+                    raise SystemExit(f'--hold: {sub} has submitted jobs; hold it after they ended')
+                entry.update(held_status=entry['status'], status='held')
+                self.log(f'{sub}: held (was {entry["held_status"]})')
+        self.save()
+
     def status(self):
         counts = {}
         for sub, entry in sorted(self.state['subjects'].items()):
             counts[entry['status']] = counts.get(entry['status'], 0) + 1
-            if entry['status'] in ('submitted', 'failed', 'skipped'):
+            if entry['status'] in ('submitted', 'failed', 'skipped', 'held'):
                 jobs = ' '.join(f'{k[:-4]}={entry[k]}' for k in ('gpu_job', 'cpu_job', 'report_job') if entry.get(k))
                 print(f'{sub:>14} {entry["status"]:<9} {jobs} {entry.get("reason", "")}')
         for sub, sessions in self.state.get('excluded_sessions', {}).items():
@@ -649,12 +669,18 @@ def parse_args(argv=None):
                    help='Leave sessions out of future uploads, e.g. sub-072_ses-2 (unusable images). '
                         'Kept in the state; combine with --reset for subjects already processed.')
     p.add_argument('--include-sessions', metavar='LIST', help='Undo --exclude-sessions for these sessions.')
+    p.add_argument('--hold', metavar='IDS', help='Leave these subjects out for now (status held); kept in the state.')
+    p.add_argument('--release', metavar='IDS', help='Process held subjects again.')
     p.add_argument('pipeline_args', nargs=argparse.REMAINDER,
                    help='After --: options for struct_bids.sh. Default: --long --SEL')
     args = p.parse_args(argv)
     args.pipeline_args = [a for a in args.pipeline_args if a != '--'] or None
     if args.pipeline_args and any(a.startswith(('--stage', '--subjects')) for a in args.pipeline_args):
         p.error('--stage and --subjects are set per job by the driver')
+    driver_options = {o for a in p._actions for o in a.option_strings}
+    misplaced = [a for a in args.pipeline_args or [] if a.split('=')[0] in driver_options]
+    if misplaced:
+        p.error(f'{" ".join(misplaced)} after "--" would go to struct_bids.sh; put driver options before "--"')
     if not args.remote_bids.startswith('/'):
         p.error('--remote-bids must be an absolute path')
     if args.local_out.resolve() == args.local_bids.resolve():
@@ -683,7 +709,7 @@ def main(argv=None):
     driver = Driver(args)
     driver.state_dir.mkdir(parents=True, exist_ok=True)
     driver.load(select_subjects(args))
-    changes_state = args.reset or args.exclude_sessions or args.include_sessions
+    changes_state = args.reset or args.exclude_sessions or args.include_sessions or args.hold or args.release
     if args.status and not changes_state:
         driver.status()
         return 0
@@ -698,6 +724,13 @@ def main(argv=None):
     try:
         if args.exclude_sessions or args.include_sessions:
             driver.set_excluded_sessions(args.exclude_sessions, args.include_sessions)
+        for option, release in ((args.hold, False), (args.release, True)):
+            if option:
+                subjects, missing = resolve_subjects([s for s in option.split(',') if s.strip()],
+                                                     list(driver.state['subjects']))
+                if missing:
+                    raise SystemExit(f'--hold/--release: not in the selected subjects: {", ".join(missing)}')
+                driver.hold(subjects, release)
         if args.reset:
             subjects, missing = resolve_subjects([s for s in args.reset.split(',') if s.strip()],
                                                  list(driver.state['subjects']))
